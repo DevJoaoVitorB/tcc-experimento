@@ -164,7 +164,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
-  # 4. DAST: inicia a API, obtém o OpenAPI em execução, executa ZAP e os testes complementares.
+  # 4. DAST: resultados de segurança são dados da pesquisa; erros operacionais reprovam o job.
   dast:
     name: DAST (OWASP ZAP + Complementary Tests)
     runs-on: ubuntu-24.04
@@ -187,12 +187,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/dast-evidence"
           EVIDENCE="$RUNNER_TEMP/dast-evidence"
 
-          # Códigos 125 indicam que a etapa não foi executada; evita confundir ausência de arquivo com falha silenciosa.
           echo "125" > "$EVIDENCE/zap-exit-code.txt"
           echo "125" > "$EVIDENCE/complementary-exit-code.txt"
           echo "not-run" > "$EVIDENCE/openapi-status.txt"
 
-          # Registra o resultado da inicialização para diferenciar erro de infraestrutura de achados de segurança.
           set +e
           docker compose up --build -d > "$EVIDENCE/compose-up.txt" 2>&1
           compose_code=$?
@@ -200,44 +198,41 @@ jobs:
           set -e
           cat "$EVIDENCE/compose-up.txt"
 
-          if [ "$compose_code" -eq 0 ]; then
-            # Aguarda a API e valida a especificação real antes de iniciar o ZAP.
-            for attempt in {1..30}; do
-              if curl -fsS http://localhost:3000/health >/dev/null && \
-                 curl -fsS http://localhost:3000/openapi.json -o "$EVIDENCE/openapi-runtime.json" && \
-                 jq -e 'type == "object" and .openapi != null and (.paths | type == "object")' "$EVIDENCE/openapi-runtime.json" >/dev/null; then
-                if jq 'if (.servers | type) == "array" and (.servers | length) > 0 then .servers[0].url = "http://host.docker.internal:3000" | .servers = [ .servers[0] ] else .servers = [{"url":"http://host.docker.internal:3000"}] end' \
-                  "$EVIDENCE/openapi-runtime.json" > "$EVIDENCE/openapi-for-zap.json"; then
-                  echo "prepared" > "$EVIDENCE/openapi-status.txt"
-                else
-                  echo "Falha ao transformar OpenAPI para o ZAP." > "$EVIDENCE/openapi-error.txt"
-                  echo "prepare-failed" > "$EVIDENCE/openapi-status.txt"
-                  rm -f "$EVIDENCE/openapi-for-zap.json"
-                fi
-                break
-              fi
-              sleep 2
-            done
-            if [ ! -f "$EVIDENCE/openapi-for-zap.json" ]; then
-              {
-                echo "OpenAPI não ficou disponível ou inválido após 30 tentativas."
-                echo "Última resposta /health:"
-                curl -sS -i --max-time 5 http://localhost:3000/health 2>&1 || true
-                echo "Última resposta /openapi.json:"
-                curl -sS -i --max-time 5 http://localhost:3000/openapi.json 2>&1 || true
-                echo "Estado dos containers:"
-                docker compose ps -a 2>&1 || true
-                echo "Logs da aplicação:"
-                docker compose logs --no-color --tail=200 2>&1 || true
-              } > "$EVIDENCE/openapi-error.txt"
-              echo "unavailable-or-invalid" > "$EVIDENCE/openapi-status.txt"
-            fi
-          else
+          if [ "$compose_code" -ne 0 ]; then
             {
               echo "docker compose up falhou com código $compose_code."
               docker compose ps -a 2>&1 || true
               docker compose logs --no-color --tail=200 2>&1 || true
             } > "$EVIDENCE/compose-diagnostics.txt"
+            exit 1
+          fi
+
+          for attempt in {1..30}; do
+            if curl -fsS http://localhost:3000/health >/dev/null && \
+               curl -fsS http://localhost:3000/openapi.json -o "$EVIDENCE/openapi-runtime.json" && \
+               jq -e 'type == "object" and .openapi != null and (.paths | type == "object")' "$EVIDENCE/openapi-runtime.json" >/dev/null; then
+              jq 'if (.servers | type) == "array" and (.servers | length) > 0 then .servers[0].url = "http://host.docker.internal:3000" | .servers = [ .servers[0] ] else .servers = [{"url":"http://host.docker.internal:3000"}] end' \
+                "$EVIDENCE/openapi-runtime.json" > "$EVIDENCE/openapi-for-zap.json"
+
+              if jq -e 'type == "object" and .openapi != null and (.paths | type == "object")' "$EVIDENCE/openapi-for-zap.json" >/dev/null; then
+                echo "prepared" > "$EVIDENCE/openapi-status.txt"
+                break
+              fi
+              rm -f "$EVIDENCE/openapi-for-zap.json"
+            fi
+            sleep 2
+          done
+
+          if [ ! -s "$EVIDENCE/openapi-for-zap.json" ]; then
+            {
+              echo "OpenAPI não ficou disponível ou válido após 30 tentativas."
+              curl -sS -i --max-time 5 http://localhost:3000/health 2>&1 || true
+              curl -sS -i --max-time 5 http://localhost:3000/openapi.json 2>&1 || true
+              docker compose ps -a 2>&1 || true
+              docker compose logs --no-color --tail=200 2>&1 || true
+            } > "$EVIDENCE/openapi-error.txt"
+            echo "unavailable-or-invalid" > "$EVIDENCE/openapi-status.txt"
+            exit 1
           fi
 
       - name: Run ZAP and complementary tests
@@ -248,58 +243,92 @@ jobs:
           DAST_REPORT_PATH: ${{ runner.temp }}/dast-evidence/dast-rs01-rs07-report.json
           DAST_RATE_LIMIT_ATTEMPTS: "30"
         run: |
+          set -euo pipefail
           EVIDENCE="$RUNNER_TEMP/dast-evidence"
           mkdir -p "$EVIDENCE"
 
-          # ZAP e testes complementares podem falhar, mas os códigos e logs ficam guardados.
-          if [ -f "$EVIDENCE/openapi-for-zap.json" ]; then
-            set +e
-
-            # Executa o ZAP sem montar o diretório de relatórios do host no container.
-            docker run --name zap-dast --add-host=host.docker.internal:host-gateway \
-              -v "$EVIDENCE:/zap/wrk:ro" \
-              ghcr.io/zaproxy/zaproxy:2.16.1 zap-api-scan.py \
-              -t /zap/wrk/openapi-for-zap.json -f openapi \
-              -r /tmp/dast-report.html \
-              -J /tmp/dast-report.json \
-              -w /tmp/dast-report.md \
-              -I > "$EVIDENCE/zap-console.txt" 2>&1
-
-            ZAP_EXIT_CODE=$?
-            echo "$ZAP_EXIT_CODE" > "$EVIDENCE/zap-exit-code.txt"
-
-            # Recupera os relatórios antes de remover o container.
-            if docker container inspect zap-dast >/dev/null 2>&1; then
-              for REPORT in dast-report.html dast-report.json dast-report.md; do
-                docker cp "zap-dast:/tmp/$REPORT" "$EVIDENCE/$REPORT"
-                COPY_EXIT_CODE=$?
-                if [ "$COPY_EXIT_CODE" -ne 0 ]; then
-                  echo "Falha ao copiar o relatório $REPORT do container ZAP." \
-                    >> "$EVIDENCE/zap-console.txt"
-                fi
-              done
-              docker rm -f zap-dast >/dev/null 2>&1
-            fi
-
-            cat "$EVIDENCE/zap-console.txt"
-
-            # Executa os testes complementares independentemente do resultado do ZAP.
-            node --experimental-strip-types workflows_support/dast-rs01-rs07.test.ts \
-              > "$EVIDENCE/complementary-console.txt" 2>&1
-            echo "$?" > "$EVIDENCE/complementary-exit-code.txt"
-
-            set -e
-            cat "$EVIDENCE/complementary-console.txt"
-          else
-            if [ ! -f "$EVIDENCE/openapi-error.txt" ]; then
-              echo "OpenAPI ausente ou inválido; ZAP e testes complementares não executados." \
-                > "$EVIDENCE/openapi-error.txt"
-            fi
-            echo "125" > "$EVIDENCE/zap-exit-code.txt"
-            echo "125" > "$EVIDENCE/complementary-exit-code.txt"
-            echo "skipped" > "$EVIDENCE/zap-status.txt"
-            echo "skipped" > "$EVIDENCE/complementary-status.txt"
+          if [ ! -s "$EVIDENCE/openapi-for-zap.json" ]; then
+            echo "OpenAPI ausente ou inválido; não é possível executar o DAST." >&2
+            exit 1
           fi
+
+          # O ZAP pode retornar código diferente de zero por achados.
+          # O relatório e o código são preservados para a análise.
+          set +e
+          docker run --name zap-dast --add-host=host.docker.internal:host-gateway \
+            -v "$EVIDENCE:/zap/wrk:ro" \
+            ghcr.io/zaproxy/zaproxy:2.16.1 zap-api-scan.py \
+            -t /zap/wrk/openapi-for-zap.json -f openapi \
+            -r /tmp/dast-report.html \
+            -J /tmp/dast-report.json \
+            -w /tmp/dast-report.md \
+            -I > "$EVIDENCE/zap-console.txt" 2>&1
+          zap_code=$?
+          echo "$zap_code" > "$EVIDENCE/zap-exit-code.txt"
+
+          if docker container inspect zap-dast >/dev/null 2>&1; then
+            for report in dast-report.html dast-report.json dast-report.md; do
+              docker cp "zap-dast:/tmp/$report" "$EVIDENCE/$report" >> "$EVIDENCE/zap-console.txt" 2>&1
+              echo "$?" > "$EVIDENCE/copy-${report}-exit-code.txt"
+            done
+            docker rm -f zap-dast >/dev/null 2>&1
+          fi
+          set -e
+          cat "$EVIDENCE/zap-console.txt"
+
+          # Códigos 0, 1 e 2 são aceitos somente se o relatório JSON for válido.
+          case "$zap_code" in
+            0|1|2) ;;
+            *)
+              echo "ZAP falhou operacionalmente (código $zap_code)." >&2
+              exit 1
+              ;;
+          esac
+
+          if [ ! -s "$EVIDENCE/dast-report.json" ] || \
+             ! jq -e 'type == "object"' "$EVIDENCE/dast-report.json" >/dev/null 2>&1; then
+            echo "ZAP não gerou um relatório JSON válido." >&2
+            exit 1
+          fi
+
+          # Código 1 pode indicar testes reprovados; só é aceito com relatório válido
+          # e sem erros de infraestrutura registrados pelo próprio script.
+          set +e
+          node --experimental-strip-types workflows_support/dast-rs01-rs07.test.ts \
+            > "$EVIDENCE/complementary-console.txt" 2>&1
+          complementary_code=$?
+          echo "$complementary_code" > "$EVIDENCE/complementary-exit-code.txt"
+          set -e
+          cat "$EVIDENCE/complementary-console.txt"
+
+          case "$complementary_code" in
+            0|1) ;;
+            *)
+              echo "O script complementar falhou durante a execução (código $complementary_code)." >&2
+              exit 1
+              ;;
+          esac
+
+          if [ ! -s "$DAST_REPORT_PATH" ] || \
+             ! jq -e '
+               .summary
+               | type == "object"
+                 and (.passed | type == "number")
+                 and (.failed | type == "number")
+                 and (.notEvaluated | type == "number")
+                 and (.infrastructureErrors | type == "number")
+             ' "$DAST_REPORT_PATH" >/dev/null 2>&1; then
+            echo "Relatório complementar ausente ou inválido." >&2
+            exit 1
+          fi
+
+          infrastructure_errors="$(jq -r '.summary.infrastructureErrors' "$DAST_REPORT_PATH")"
+          if [ "$infrastructure_errors" -ne 0 ]; then
+            echo "Os testes registraram erros de infraestrutura: $infrastructure_errors." >&2
+            exit 1
+          fi
+
+          echo "Avaliação complementar concluída; resultados de segurança preservados no relatório."
 
       - name: Record DAST metadata and hashes
         if: always()
@@ -307,7 +336,6 @@ jobs:
         run: |
           EVIDENCE="$RUNNER_TEMP/dast-evidence"
           mkdir -p "$EVIDENCE"
-          # Registra versões, arquivos de configuração e hashes para reproduzir a execução.
           {
             echo "run_id=$GITHUB_RUN_ID"
             echo "run_attempt=$GITHUB_RUN_ATTEMPT"
@@ -319,13 +347,14 @@ jobs:
             echo "zap_image=ghcr.io/zaproxy/zaproxy:2.16.1"
             docker image inspect ghcr.io/zaproxy/zaproxy:2.16.1 --format '{{index .RepoDigests 0}}' 2>/dev/null || true
           } > "$EVIDENCE/environment.txt"
+
           cp .github/workflows/experiment.yml "$EVIDENCE/experiment.yml" 2>/dev/null || true
           cp workflows_support/dast-rs01-rs07.test.ts "$EVIDENCE/" 2>/dev/null || true
           cp docker-compose.yml "$EVIDENCE/" 2>/dev/null || cp compose.yml "$EVIDENCE/" 2>/dev/null || true
           [ ! -f Dockerfile ] || cp Dockerfile "$EVIDENCE/"
-          find "$EVIDENCE" -maxdepth 1 -type f ! -name evidence-sha256.txt -print0 | sort -z | xargs -0 -r sha256sum > "$EVIDENCE/evidence-sha256.txt"
+          find "$EVIDENCE" -maxdepth 1 -type f ! -name evidence-sha256.txt \
+            -print0 | sort -z | xargs -0 -r sha256sum > "$EVIDENCE/evidence-sha256.txt"
 
-      # Envia as evidências mesmo quando a API, o ZAP ou um teste falha.
       - name: Upload DAST evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -335,27 +364,82 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
 
-      # Falha após o upload se uma etapa essencial não foi executada ou terminou com erro.
       - name: Check DAST execution status
         if: always()
         shell: bash
         run: |
+          set -euo pipefail
           EVIDENCE="$RUNNER_TEMP/dast-evidence"
           errors=0
-          for file in compose-up-exit-code.txt zap-exit-code.txt complementary-exit-code.txt; do
-            path="$EVIDENCE/$file"
-            if [ ! -f "$path" ]; then
-              echo "Evidência ausente: $file"
-              errors=1
-            elif [ "$(cat "$path")" != "0" ]; then
-              echo "Etapa falhou ou não foi executada: $file (código $(cat "$path"))"
-              errors=1
-            fi
-          done
-          if [ ! -f "$EVIDENCE/openapi-for-zap.json" ]; then
-            echo "OpenAPI não preparado; veja openapi-error.txt, compose-diagnostics.txt e os logs preservados no artefato."
+
+          # A API e o OpenAPI são pré-requisitos operacionais.
+          if [ ! -f "$EVIDENCE/compose-up-exit-code.txt" ] || \
+             [ "$(cat "$EVIDENCE/compose-up-exit-code.txt")" != "0" ]; then
+            echo "A API não iniciou corretamente."
             errors=1
           fi
+
+          if [ ! -s "$EVIDENCE/openapi-for-zap.json" ] || \
+             ! jq -e 'type == "object" and .openapi != null and (.paths | type == "object")' \
+               "$EVIDENCE/openapi-for-zap.json" >/dev/null 2>&1; then
+            echo "OpenAPI ausente ou inválido."
+            errors=1
+          fi
+
+          # Não reprova por achados do ZAP; exige conclusão e relatório válido.
+          if [ ! -f "$EVIDENCE/zap-exit-code.txt" ]; then
+            echo "Evidência ausente: zap-exit-code.txt"
+            errors=1
+          else
+            zap_code="$(cat "$EVIDENCE/zap-exit-code.txt")"
+            case "$zap_code" in
+              0|1|2)
+                if [ ! -s "$EVIDENCE/dast-report.json" ] || \
+                   ! jq -e 'type == "object"' "$EVIDENCE/dast-report.json" >/dev/null 2>&1; then
+                  echo "Relatório JSON do ZAP ausente ou inválido."
+                  errors=1
+                fi
+                ;;
+              *)
+                echo "ZAP falhou operacionalmente (código $zap_code)."
+                errors=1
+                ;;
+            esac
+          fi
+
+          # Código 1 é aceito quando representa reprovações registradas no relatório.
+          if [ ! -f "$EVIDENCE/complementary-exit-code.txt" ]; then
+            echo "Evidência ausente: complementary-exit-code.txt"
+            errors=1
+          else
+            complementary_code="$(cat "$EVIDENCE/complementary-exit-code.txt")"
+            case "$complementary_code" in
+              0|1)
+                if [ ! -s "$EVIDENCE/dast-rs01-rs07-report.json" ] || \
+                   ! jq -e '
+                     .summary
+                     | type == "object"
+                       and (.passed | type == "number")
+                       and (.failed | type == "number")
+                       and (.notEvaluated | type == "number")
+                       and (.infrastructureErrors | type == "number")
+                   ' "$EVIDENCE/dast-rs01-rs07-report.json" >/dev/null 2>&1; then
+                  echo "Relatório complementar ausente ou inválido."
+                  errors=1
+                elif [ "$(jq -r '.summary.infrastructureErrors' "$EVIDENCE/dast-rs01-rs07-report.json")" -ne 0 ]; then
+                  echo "O relatório complementar indica erros de infraestrutura."
+                  errors=1
+                else
+                  echo "Testes complementares concluídos; reprovações da API são dados de pesquisa."
+                fi
+                ;;
+              *)
+                echo "Script complementar falhou operacionalmente (código $complementary_code)."
+                errors=1
+                ;;
+            esac
+          fi
+
           exit "$errors"
 
       - name: Stop API

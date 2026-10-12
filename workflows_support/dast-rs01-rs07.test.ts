@@ -228,24 +228,24 @@ async function testRs01() {
   for (const [label, options] of [
     ['sem token', {}], ['com esquema Basic', { authorization: 'Basic ZGFzdDpkYXN0' }]
   ]) {
-    await runTest('RS01', `GET /auth/me ${label} é rejeitado`, async () => {
-      const response = await request('GET', '/auth/me', options);
+    await runTest('RS01', `GET /users/me ${label} é rejeitado`, async () => {
+      const response = await request('GET', '/users/me', options);
       return outcome(accessResult(response.status), `HTTP ${response.status}; esperado 401 ou 403.`);
     });
   }
 
-  await runTest('RS01', 'Token válido permite acessar /auth/me', async () => {
+  await runTest('RS01', 'Token válido permite acessar /users/me', async () => {
     if (!accountA.accessToken) return notEvaluated('Conta A não foi autenticada.');
-    const response = await request('GET', '/auth/me', { token: accountA.accessToken });
+    const response = await request('GET', '/users/me', { token: accountA.accessToken });
     return outcome(response.status === 200 ? 'PASS' : isAuthDenied(response.status) ? 'FAIL' : 'NOT_EVALUATED',
-      `Login HTTP ${accountA.loginResponse.status}; /auth/me HTTP ${response.status}.`);
+      `Login HTTP ${accountA.loginResponse.status}; /users/me HTTP ${response.status}.`);
   });
 
   await runTest('RS01', 'Cada token retorna apenas os dados do próprio usuário', async () => {
     if (!accountA.accessToken || !accountB.accessToken) return notEvaluated('As contas A e B não foram ambas autenticadas.');
     const [a, b] = await Promise.all([
-      request('GET', '/auth/me', { token: accountA.accessToken }),
-      request('GET', '/auth/me', { token: accountB.accessToken })
+      request('GET', '/users/me', { token: accountA.accessToken }),
+      request('GET', '/users/me', { token: accountB.accessToken })
     ]);
     if (a.text.includes(accountB.email) || b.text.includes(accountA.email)) return outcome('FAIL', 'Dados de outra conta apareceram na resposta.');
     if (!a.text.includes(accountA.email) || !b.text.includes(accountB.email)) return notEvaluated('As respostas não permitem confirmar o isolamento entre contas.');
@@ -253,7 +253,7 @@ async function testRs01() {
   });
 
   for (const test of [
-    { name: 'Refresh token não é aceito como token de acesso', token: () => accountA.refreshToken, method: 'GET', route: '/auth/me', body: undefined },
+    { name: 'Refresh token não é aceito como token de acesso', token: () => accountA.refreshToken, method: 'GET', route: '/users/me', body: undefined },
     { name: 'Token de acesso não é aceito como refresh token', token: () => accountA.accessToken, method: 'POST', route: '/auth/refresh', body: token => ({ refreshToken: token }) }
   ]) {
     await runTest('RS01', test.name, async () => {
@@ -264,9 +264,9 @@ async function testRs01() {
     });
   }
 
-  await runTest('RS01', 'Métodos não previstos em /auth/me são rejeitados', async () => {
+  await runTest('RS01', 'Métodos não previstos em /users/me são rejeitados', async () => {
     if (!accountA.accessToken) return notEvaluated('Conta A não foi autenticada.');
-    const statuses = await Promise.all(['PUT', 'PATCH', 'DELETE'].map(async method => ({ method, status: (await request(method, '/auth/me', { token: accountA.accessToken, body: {} })).status })));
+    const statuses = await Promise.all(['PUT', 'PATCH', 'DELETE'].map(async method => ({ method, status: (await request(method, '/users/me', { token: accountA.accessToken, body: {} })).status })));
     return outcome(
       combineResults(statuses.map(item => rejectionResult(item.status, [400, 401, 403, 404, 405, 415, 422]))),
       statuses.map(item => `${item.method} HTTP ${item.status}`).join('; ')
@@ -279,12 +279,12 @@ async function testRs01() {
     if (!isSuccess(register.status)) return outcome(rejectionResult(register.status), `Cadastro com campos de privilégio HTTP ${register.status}.`);
     const session = await loginWith(body.email, body.password);
     if (!session.accessToken) return notEvaluated(`Não foi possível autenticar a conta de teste (HTTP ${session.response.status}).`);
-    const profile = await request('GET', '/auth/me', { token: session.accessToken });
+    const profile = await request('GET', '/users/me', { token: session.accessToken });
     if (reflectsPrivilege(register.json) || reflectsPrivilege(profile.json)) return outcome('FAIL', 'Campo de privilégio elevado apareceu nas respostas.');
-    return outcome('PASS', `Cadastro HTTP ${register.status}; privilégio elevado não foi refletido em /auth/me (HTTP ${profile.status}). A atribuição silenciosa não é observável via HTTP se a API não expõe papéis.`);
+    return outcome('PASS', `Cadastro HTTP ${register.status}; privilégio elevado não foi refletido em /users/me (HTTP ${profile.status}). A atribuição silenciosa não é observável via HTTP se a API não expõe papéis.`);
   });
 
-  addNotApplicable('RS01', 'IDOR em recursos de outros usuários', 'A API não possui recurso de negócio pertencente a usuários; o isolamento é verificado em /auth/me. Confirmar a especificação OpenAPI.');
+  addNotApplicable('RS01', 'IDOR em recursos de outros usuários', 'A API não possui recurso de negócio pertencente a usuários; o isolamento é verificado em /users/me. Confirmar a especificação OpenAPI.');
 }
 
 // RS02 — Configuração segura da aplicação
@@ -297,7 +297,7 @@ async function testRs02() {
   });
 
   await runTest('RS02', 'Cabeçalhos de segurança e divulgação de tecnologia', async () => {
-    const routes = ['/health', '/auth/me', `/rota-inexistente-${RUN_ID}`];
+    const routes = ['/health', '/users/me', `/rota-inexistente-${RUN_ID}`];
     const issues = [];
     for (const route of routes) {
       const response = await request('GET', route);
@@ -334,7 +334,7 @@ async function testRs02() {
       const forged = signWithSecret(accountA.accessToken, secret);
       if (!forged) break;
       signable = true;
-      if ((await request('GET', '/auth/me', { token: forged })).status === 200) accepted.push(secret);
+      if ((await request('GET', '/users/me', { token: forged })).status === 200) accepted.push(secret);
     }
     if (!signable) return notApplicable('Token não é JWT assinado com HMAC HS256, HS384 ou HS512.');
     return outcome(accepted.length ? 'FAIL' : 'PASS', accepted.length ? `Segredo previsível aceito: ${accepted.join(', ')}.` : `Nenhum dos ${candidates.length} segredos foi aceito; isso não prova que o segredo é forte.`);
@@ -370,9 +370,9 @@ async function testRs04() {
     });
   }
 
-  await runTest('RS04', 'Resposta de /auth/me não expõe credenciais', async () => {
+  await runTest('RS04', 'Resposta de /users/me não expõe credenciais', async () => {
     if (!accountA.accessToken) return notEvaluated('Conta A não foi autenticada.');
-    const response = await request('GET', '/auth/me', { token: accountA.accessToken });
+    const response = await request('GET', '/users/me', { token: accountA.accessToken });
     const exposed = exposesCredentials(response, [accountA.password]);
     return outcome(exposed ? 'FAIL' : 'PASS', `HTTP ${response.status}; credenciais ${exposed ? 'detectadas' : 'não detectadas'}.`);
   });
@@ -423,7 +423,7 @@ async function testRs06() {
     await runTest('RS06', test.name, async () => {
       const token = test.token();
       if (!token) return accountA.accessToken ? notApplicable('Token não possui formato JWT esperado.') : notEvaluated('Conta A não foi autenticada.');
-      const response = await request('GET', '/auth/me', { token });
+      const response = await request('GET', '/users/me', { token });
       return outcome(accessResult(response.status), `HTTP ${response.status}; esperado 401 ou 403.`);
     });
   }
@@ -527,7 +527,7 @@ async function testRs07() {
     if (forged) tokens.push(forged);
     const problems = [];
     for (const token of tokens) {
-      const response = await request('GET', '/auth/me', { token });
+      const response = await request('GET', '/users/me', { token });
       if (leaksInternalDetails(response.text) || response.status >= 500) problems.push(`HTTP ${response.status}`);
     }
     return outcome(problems.length ? 'FAIL' : 'PASS', problems.length ? `Respostas problemáticas: ${problems.join(', ')}.` : `Sem detalhes internos/5xx em ${tokens.length} respostas.`);
