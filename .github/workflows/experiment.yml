@@ -20,6 +20,8 @@ jobs:
           cache: npm
 
       - name: Validate application
+        env:
+          DATABASE_URL: "file:./test.db"
         run: |
           npm ci
           npx prisma generate
