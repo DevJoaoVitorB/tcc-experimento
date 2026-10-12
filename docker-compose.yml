@@ -1,0 +1,13 @@
+services:
+  api:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: file:./data/app.db
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-change-this-secret-before-production}
+    volumes:
+      - auth_data:/app/data
+
+volumes:
+  auth_data:
