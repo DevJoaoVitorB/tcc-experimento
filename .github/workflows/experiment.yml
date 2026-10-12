@@ -1,0 +1,272 @@
+name: Authentication API Experiment
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # 1. Valida a aplicação e registra as versões/arquivos usados no experimento.
+  validate:
+    name: Validate Application
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+
+      - name: Validate application
+        run: |
+          npm ci
+          npx prisma generate
+          npm test -- --exclude "workflows_support/dast-rs01-rs07.test.ts"
+          npm run build
+
+      # Guarda metadados e hashes para identificar exatamente a execução do experimento.
+      - name: Record run metadata
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p evidence
+          {
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+            echo "commit=$GITHUB_SHA"
+            echo "runner_os=$RUNNER_OS"
+            echo "node=$(node --version 2>&1 || true)"
+            echo "npm=$(npm --version 2>&1 || true)"
+            echo "docker=$(docker --version 2>&1 || true)"
+            echo "checkout_action=actions/checkout@v4"
+            echo "setup_node_action=actions/setup-node@v4"
+            echo "upload_artifact_action=actions/upload-artifact@v4"
+          } > evidence/environment.txt
+          for file in package.json package-lock.json AGENTS.md .github/workflows/experiment.yml \
+            workflows_support/sast-rs01-rs07.rules.yml workflows_support/dast-rs01-rs07.test.ts \
+            docker-compose.yml compose.yml Dockerfile; do
+            [ ! -f "$file" ] || sha256sum "$file" >> evidence/input-sha256.txt
+          done
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validate-evidence
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 90
+
+  # 2. SAST: mantém relatório completo e inventário com regra, arquivo, linha e severidade.
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-24.04
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Semgrep and preserve evidence
+        shell: bash
+        run: |
+          mkdir -p evidence
+          set +e
+          docker run --rm -v "$PWD:/src:ro" -v "$PWD/evidence:/reports:rw" -w /src \
+            semgrep/semgrep:1.105.0 semgrep scan \
+            --config p/security-audit --config p/secrets --config p/owasp-top-ten \
+            --config p/javascript --config p/typescript --config p/nodejs --config p/jwt \
+            --config /src/workflows_support/sast-rs01-rs07.rules.yml \
+            --json --output /reports/sast-report.json . > evidence/sast-console.txt 2>&1
+          code=$?
+          echo "$code" > evidence/sast-exit-code.txt
+          set -e
+          cat evidence/sast-console.txt
+
+          # TSV facilita filtrar manualmente achados de testes/infra sem apagar o relatório bruto.
+          if [ -f evidence/sast-report.json ]; then
+            jq -r '.results[]? | [.check_id, .path, (.start.line // 0 | tostring), (.extra.severity // "UNKNOWN"), (.extra.message // "")] | @tsv' \
+              evidence/sast-report.json > evidence/sast-findings.tsv || true
+          fi
+          semgrep_version=$(docker run --rm semgrep/semgrep:1.105.0 semgrep --version 2>&1 || true)
+          echo "$semgrep_version" > evidence/semgrep-version.txt
+          cp workflows_support/sast-rs01-rs07.rules.yml evidence/ 2>/dev/null || true
+          cp .github/workflows/experiment.yml evidence/experiment.yml 2>/dev/null || true
+          echo "commit=$GITHUB_SHA" >> evidence/environment.txt
+          echo "run_id=$GITHUB_RUN_ID" >> evidence/environment.txt
+
+          # Código 1 significa que há achados; códigos diferentes de 0/1 indicam erro de execução.
+          if [ "$code" != "0" ] && [ "$code" != "1" ]; then
+            echo "Semgrep não concluiu corretamente (código $code)." >&2
+            exit 1
+          fi
+
+      - name: Upload SAST evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-evidence
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 90
+
+  # 3. SCA: relatório geral inclui dependências de desenvolvimento; o segundo cobre produção.
+  sca:
+    name: SCA (npm audit)
+    runs-on: ubuntu-24.04
+    needs: validate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.14.0
+          cache: npm
+
+      - name: Audit dependencies and preserve evidence
+        shell: bash
+        run: |
+          mkdir -p evidence
+          npm ci
+          # npm audit pode retornar código diferente de zero por vulnerabilidades; os relatórios são preservados.
+          set +e
+          npm audit --json > evidence/sca-report-all.json 2> evidence/sca-stderr-all.txt
+          echo "$?" > evidence/npm-audit-all-exit-code.txt
+          npm audit --omit=dev --json > evidence/sca-report-production.json 2> evidence/sca-stderr-production.txt
+          echo "$?" > evidence/npm-audit-production-exit-code.txt
+          set -e
+          {
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "commit=$GITHUB_SHA"
+            echo "node=$(node --version 2>&1 || true)"
+            echo "npm=$(npm --version 2>&1 || true)"
+            echo "audit_all=npm audit --json"
+            echo "audit_production=npm audit --omit=dev --json"
+          } > evidence/environment.txt
+          cp package.json package-lock.json evidence/
+          sha256sum package.json package-lock.json > evidence/dependency-files-sha256.txt
+
+      - name: Upload SCA evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-evidence
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 90
+
+  # 4. DAST: inicia a API, obtém o OpenAPI em execução, executa ZAP e os testes complementares.
+  dast:
+    name: DAST (OWASP ZAP + Complementary Tests)
+    runs-on: ubuntu-24.04
+    needs: validate
+    timeout-minutes: 30
+    env:
+      JWT_ACCESS_SECRET: "dast-test-access-secret-CHANGE-ME-123456789"
+      JWT_REFRESH_SECRET: "dast-test-refresh-secret-CHANGE-ME-123456789"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start API and run DAST
+        shell: bash
+        env:
+          DAST_BASE_URL: http://localhost:3000
+          DAST_REPORT_PATH: ${{ runner.temp }}/dast-evidence/dast-rs01-rs07-report.json
+          DAST_RATE_LIMIT_ATTEMPTS: "30"
+        run: |
+          mkdir -p "$RUNNER_TEMP/dast-evidence"
+          cd "$GITHUB_WORKSPACE"
+          EVIDENCE="$RUNNER_TEMP/dast-evidence"
+
+          # Registra o resultado da inicialização para diferenciar erro de infraestrutura de achados de segurança.
+          set +e
+          docker compose up --build -d > "$EVIDENCE/compose-up.txt" 2>&1
+          compose_code=$?
+          echo "$compose_code" > "$EVIDENCE/compose-up-exit-code.txt"
+          set -e
+          cat "$EVIDENCE/compose-up.txt"
+
+          if [ "$compose_code" -eq 0 ]; then
+            # Aguarda a API e valida a especificação real antes de iniciar o ZAP.
+            for attempt in {1..30}; do
+              if curl -fsS http://localhost:3000/health >/dev/null && \
+                 curl -fsS http://localhost:3000/openapi.json -o "$EVIDENCE/openapi-runtime.json" && \
+                 jq -e 'type == "object" and .openapi != null and (.paths | type == "object")' "$EVIDENCE/openapi-runtime.json" >/dev/null; then
+                jq 'if (.servers | type) == "array" and (.servers | length) > 0 then .servers[0].url = "http://host.docker.internal:3000" | .servers = [ .servers[0] ] else .servers = [{"url":"http://host.docker.internal:3000"}] end' \
+                  "$EVIDENCE/openapi-runtime.json" > "$EVIDENCE/openapi-for-zap.json"
+                break
+              fi
+              sleep 2
+            done
+          fi
+
+          # ZAP e testes complementares podem falhar, mas os códigos e logs ficam guardados.
+          if [ -f "$EVIDENCE/openapi-for-zap.json" ]; then
+            set +e
+            docker run --rm --add-host=host.docker.internal:host-gateway \
+              -v "$EVIDENCE:/zap/wrk:ro" -v "$EVIDENCE:/zap/reports:rw" \
+              ghcr.io/zaproxy/zaproxy:2.16.1 zap-api-scan.py \
+              -t /zap/wrk/openapi-for-zap.json -f openapi \
+              -r /zap/reports/dast-report.html -J /zap/reports/dast-report.json \
+              -w /zap/reports/dast-report.md -I > "$EVIDENCE/zap-console.txt" 2>&1
+            echo "$?" > "$EVIDENCE/zap-exit-code.txt"
+            cat "$EVIDENCE/zap-console.txt"
+
+            node --experimental-strip-types workflows_support/dast-rs01-rs07.test.ts \
+              > "$EVIDENCE/complementary-console.txt" 2>&1
+            echo "$?" > "$EVIDENCE/complementary-exit-code.txt"
+            set -e
+            cat "$EVIDENCE/complementary-console.txt"
+          else
+            echo "OpenAPI ausente ou inválido; ZAP e testes complementares não executados." > "$EVIDENCE/openapi-error.txt"
+          fi
+
+          # Registra versões, arquivos de configuração e hashes para reproduzir a execução.
+          {
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+            echo "commit=$GITHUB_SHA"
+            echo "runner_os=$RUNNER_OS"
+            echo "node=$(node --version 2>&1 || true)"
+            echo "npm=$(npm --version 2>&1 || true)"
+            echo "docker=$(docker --version 2>&1 || true)"
+            echo "zap_image=ghcr.io/zaproxy/zaproxy:2.16.1"
+            docker image inspect ghcr.io/zaproxy/zaproxy:2.16.1 --format '{{index .RepoDigests 0}}' 2>/dev/null || true
+          } > "$EVIDENCE/environment.txt"
+          cp .github/workflows/experiment.yml "$EVIDENCE/experiment.yml" 2>/dev/null || true
+          cp workflows_support/dast-rs01-rs07.test.ts "$EVIDENCE/" 2>/dev/null || true
+          cp docker-compose.yml "$EVIDENCE/" 2>/dev/null || cp compose.yml "$EVIDENCE/" 2>/dev/null || true
+          [ ! -f Dockerfile ] || cp Dockerfile "$EVIDENCE/"
+          find "$EVIDENCE" -maxdepth 1 -type f ! -name evidence-sha256.txt -print0 | sort -z | xargs -0 -r sha256sum > "$EVIDENCE/evidence-sha256.txt"
+
+      # Envia as evidências mesmo quando a API, o ZAP ou um teste falha.
+      - name: Upload DAST evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-evidence
+          path: ${{ runner.temp }}/dast-evidence/
+          if-no-files-found: warn
+          retention-days: 90
+
+      # Falha após o upload se uma etapa essencial não foi executada ou terminou com erro.
+      - name: Check DAST execution status
+        if: always()
+        shell: bash
+        run: |
+          EVIDENCE="$RUNNER_TEMP/dast-evidence"
+          errors=0
+          for file in compose-up-exit-code.txt zap-exit-code.txt complementary-exit-code.txt; do
+            path="$EVIDENCE/$file"
+            if [ ! -f "$path" ] || [ "$(cat "$path")" != "0" ]; then
+              echo "Etapa ausente ou com erro: $file"
+              errors=1
+            fi
+          done
+          [ -f "$EVIDENCE/openapi-for-zap.json" ] || { echo "OpenAPI não preparado; DAST incompleto."; errors=1; }
+          exit "$errors"
+
+      - name: Stop API
+        if: always()
+        run: docker compose down --volumes --remove-orphans
