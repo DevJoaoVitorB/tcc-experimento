@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 'use strict';
 
-const fs = require('node:fs');
-const path = require('node:path');
-const crypto = require('node:crypto');
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 
 // Configuração
 const BASE_URL = (process.env.DAST_BASE_URL || 'http://localhost:3000').replace(/\/+$/, '');

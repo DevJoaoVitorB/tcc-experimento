@@ -250,26 +250,50 @@ jobs:
         run: |
           EVIDENCE="$RUNNER_TEMP/dast-evidence"
           mkdir -p "$EVIDENCE"
+
           # ZAP e testes complementares podem falhar, mas os códigos e logs ficam guardados.
           if [ -f "$EVIDENCE/openapi-for-zap.json" ]; then
             set +e
-            docker run --rm --add-host=host.docker.internal:host-gateway \
-              -v "$EVIDENCE:/zap/wrk:ro" -v "$EVIDENCE:/zap/reports:rw" \
+
+            # Executa o ZAP sem montar o diretório de relatórios do host no container.
+            docker run --name zap-dast --add-host=host.docker.internal:host-gateway \
+              -v "$EVIDENCE:/zap/wrk:ro" \
               ghcr.io/zaproxy/zaproxy:2.16.1 zap-api-scan.py \
               -t /zap/wrk/openapi-for-zap.json -f openapi \
-              -r /zap/reports/dast-report.html -J /zap/reports/dast-report.json \
-              -w /zap/reports/dast-report.md -I > "$EVIDENCE/zap-console.txt" 2>&1
-            echo "$?" > "$EVIDENCE/zap-exit-code.txt"
+              -r /tmp/dast-report.html \
+              -J /tmp/dast-report.json \
+              -w /tmp/dast-report.md \
+              -I > "$EVIDENCE/zap-console.txt" 2>&1
+
+            ZAP_EXIT_CODE=$?
+            echo "$ZAP_EXIT_CODE" > "$EVIDENCE/zap-exit-code.txt"
+
+            # Recupera os relatórios antes de remover o container.
+            if docker container inspect zap-dast >/dev/null 2>&1; then
+              for REPORT in dast-report.html dast-report.json dast-report.md; do
+                docker cp "zap-dast:/tmp/$REPORT" "$EVIDENCE/$REPORT"
+                COPY_EXIT_CODE=$?
+                if [ "$COPY_EXIT_CODE" -ne 0 ]; then
+                  echo "Falha ao copiar o relatório $REPORT do container ZAP." \
+                    >> "$EVIDENCE/zap-console.txt"
+                fi
+              done
+              docker rm -f zap-dast >/dev/null 2>&1
+            fi
+
             cat "$EVIDENCE/zap-console.txt"
 
+            # Executa os testes complementares independentemente do resultado do ZAP.
             node --experimental-strip-types workflows_support/dast-rs01-rs07.test.ts \
               > "$EVIDENCE/complementary-console.txt" 2>&1
             echo "$?" > "$EVIDENCE/complementary-exit-code.txt"
+
             set -e
             cat "$EVIDENCE/complementary-console.txt"
           else
             if [ ! -f "$EVIDENCE/openapi-error.txt" ]; then
-              echo "OpenAPI ausente ou inválido; ZAP e testes complementares não executados." > "$EVIDENCE/openapi-error.txt"
+              echo "OpenAPI ausente ou inválido; ZAP e testes complementares não executados." \
+                > "$EVIDENCE/openapi-error.txt"
             fi
             echo "125" > "$EVIDENCE/zap-exit-code.txt"
             echo "125" > "$EVIDENCE/complementary-exit-code.txt"
