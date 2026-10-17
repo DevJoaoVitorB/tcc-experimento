@@ -610,13 +610,15 @@ jobs:
 
           # Os ZIPs contêm uma pasta evidence-{job} na raiz.
           def read_json(job, filename):
-              path = root / f"evidence-{job}" / job / filename
-              if not path.is_file() or path.stat().st_size == 0:
-                  return None
-              try:
-                  return json.loads(path.read_text(encoding="utf-8"))
-              except (OSError, json.JSONDecodeError):
-                  return None
+            path = root / f"evidence-{job}" / filename
+
+            if not path.is_file() or path.stat().st_size == 0:
+                return None
+
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return None
 
           unavailable = (
               "**Evidência indisponível:** relatório ausente, vazio ou inválido. "
