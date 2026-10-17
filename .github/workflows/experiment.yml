@@ -209,28 +209,40 @@ jobs:
               if: always()
               shell: bash
               env:
-                  DAST_BASE_URL: http://localhost:3000
-                  DAST_REPORT_PATH: ${{ runner.temp }}/dast-evidence/dast-rs01-rs07-report.json
-                  DAST_RATE_LIMIT_ATTEMPTS: '30'
+                  JWT_ACCESS_SECRET: dast-test-access-secret-CHANGE-ME-123456789
+                  JWT_REFRESH_SECRET: dast-test-refresh-secret-CHANGE-ME-123456789
               run: |
                   EVIDENCE="$RUNNER_TEMP/dast-evidence"
-                  if [ -f "$EVIDENCE/openapi-for-zap.json" ]; then
-                    set +e
-                    docker run --rm --add-host=host.docker.internal:host-gateway \
-                      -v "$EVIDENCE:/zap/wrk:ro" -v "$EVIDENCE:/zap/reports:rw" \
-                      ghcr.io/zaproxy/zaproxy:2.16.1 zap-api-scan.py \
-                      -t /zap/wrk/openapi-for-zap.json -f openapi \
-                      -r /zap/reports/dast-report.html -J /zap/reports/dast-report.json \
-                      -w /zap/reports/dast-report.md -I > "$EVIDENCE/zap-console.txt" 2>&1
-                    echo "$?" > "$EVIDENCE/zap-exit-code.txt"
-                    node --experimental-strip-types workflows_support/dast-rs01-rs07.test.ts \
-                      > "$EVIDENCE/complementary-console.txt" 2>&1
-                    echo "$?" > "$EVIDENCE/complementary-exit-code.txt"
-                    set -e
-                  else
-                    echo skipped > "$EVIDENCE/zap-status.txt"
-                    echo skipped > "$EVIDENCE/complementary-status.txt"
-                  fi
+                  mkdir -p "$EVIDENCE"
+
+                  # Valores padrão indicam que a etapa não foi executada.
+                  echo "not_executed" > "$EVIDENCE/zap-exit-code.txt"
+                  echo "not_executed" > "$EVIDENCE/complementary-exit-code.txt"
+
+                  # Executa o OWASP ZAP e preserva seu código de saída.
+                  set +e
+                  docker run --rm \
+                    --network "${{ job.container.network }}" \
+                    -v "$EVIDENCE:/zap/wrk/:rw" \
+                    ghcr.io/zaproxy/zaproxy:2.16.1 \
+                    zap-api-scan.py \
+                    -t "$EVIDENCE/openapi-for-zap.json" \
+                    -f openapi \
+                    -J zap-report.json \
+                    -r zap-report.html \
+                    > "$EVIDENCE/zap-console.log" 2>&1
+                  zap_exit=$?
+                  echo "$zap_exit" > "$EVIDENCE/zap-exit-code.txt"
+
+                  # Executa os testes complementares RS01–RS07.
+                  npm run test:dast:complementary \
+                    > "$EVIDENCE/complementary-console.log" 2>&1
+                  complementary_exit=$?
+                  echo "$complementary_exit" > "$EVIDENCE/complementary-exit-code.txt"
+                  set -e
+
+                  echo "OWASP ZAP exit code: $zap_exit"
+                  echo "Complementary tests exit code: $complementary_exit"
             - name: Capture DAST configuration and hashes
               if: always()
               shell: bash
