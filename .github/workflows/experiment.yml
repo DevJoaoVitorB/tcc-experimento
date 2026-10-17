@@ -209,40 +209,58 @@ jobs:
               if: always()
               shell: bash
               env:
-                  JWT_ACCESS_SECRET: dast-test-access-secret-CHANGE-ME-123456789
-                  JWT_REFRESH_SECRET: dast-test-refresh-secret-CHANGE-ME-123456789
+                  JWT_ACCESS_SECRET: 'dast-test-access-secret-CHANGE-ME-123456789'
+                  JWT_REFRESH_SECRET: 'dast-test-refresh-secret-CHANGE-ME-123456789'
               run: |
                   EVIDENCE="$RUNNER_TEMP/dast-evidence"
                   mkdir -p "$EVIDENCE"
 
-                  # Valores padrão indicam que a etapa não foi executada.
-                  echo "not_executed" > "$EVIDENCE/zap-exit-code.txt"
-                  echo "not_executed" > "$EVIDENCE/complementary-exit-code.txt"
+                  echo "125" > "$EVIDENCE/zap-exit-code.txt"
+                  echo "125" > "$EVIDENCE/complementary-exit-code.txt"
 
-                  # Executa o OWASP ZAP e preserva seu código de saída.
+                  # Executa o ZAP somente se o OpenAPI estiver disponível.
+                  if [ -s "$EVIDENCE/openapi-for-zap.json" ]; then
+                    set +e
+                    docker run --rm \
+                      --add-host=host.docker.internal:host-gateway \
+                      -v "$EVIDENCE:/zap/wrk/:rw" \
+                      ghcr.io/zaproxy/zaproxy:2.16.1 \
+                      zap-api-scan.py \
+                      -t /zap/wrk/openapi-for-zap.json \
+                      -f openapi \
+                      -J zap-report.json \
+                      -r zap-report.html \
+                      > "$EVIDENCE/zap-console.log" 2>&1
+                    zap_exit=$?
+                    echo "$zap_exit" > "$EVIDENCE/zap-exit-code.txt"
+                    set -e
+                  else
+                    echo "OpenAPI ausente; análise ZAP não executada." \
+                      > "$EVIDENCE/zap-console.log"
+                  fi
+
+                  # Executa os testes complementares independentemente do ZAP.
                   set +e
-                  docker run --rm \
-                    --network "${{ job.container.network }}" \
-                    -v "$EVIDENCE:/zap/wrk/:rw" \
-                    ghcr.io/zaproxy/zaproxy:2.16.1 \
-                    zap-api-scan.py \
-                    -t "$EVIDENCE/openapi-for-zap.json" \
-                    -f openapi \
-                    -J zap-report.json \
-                    -r zap-report.html \
-                    > "$EVIDENCE/zap-console.log" 2>&1
-                  zap_exit=$?
-                  echo "$zap_exit" > "$EVIDENCE/zap-exit-code.txt"
+                  npm ci
+                  install_exit=$?
 
-                  # Executa os testes complementares RS01–RS07.
-                  npm run test:dast:complementary \
-                    > "$EVIDENCE/complementary-console.log" 2>&1
-                  complementary_exit=$?
-                  echo "$complementary_exit" > "$EVIDENCE/complementary-exit-code.txt"
+                  if [ "$install_exit" -eq 0 ]; then
+                    node --experimental-strip-types \
+                      workflows_support/dast-rs01-rs07.test.ts \
+                      > "$EVIDENCE/complementary-console.log" 2>&1
+                    complementary_exit=$?
+                  else
+                    complementary_exit="$install_exit"
+                    echo "Falha ao instalar dependências." \
+                      > "$EVIDENCE/complementary-console.log"
+                  fi
+
+                  echo "$complementary_exit" \
+                    > "$EVIDENCE/complementary-exit-code.txt"
                   set -e
 
-                  echo "OWASP ZAP exit code: $zap_exit"
-                  echo "Complementary tests exit code: $complementary_exit"
+                  echo "OWASP ZAP exit code: $(cat "$EVIDENCE/zap-exit-code.txt")"
+                  echo "Complementary tests exit code: $(cat "$EVIDENCE/complementary-exit-code.txt")"
             - name: Capture DAST configuration and hashes
               if: always()
               shell: bash
