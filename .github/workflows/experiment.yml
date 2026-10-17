@@ -212,7 +212,7 @@ jobs:
                   retention-days: 1
 
     dast:
-        name: DAST (OWASP ZAP + Complementary Tests)
+        name: DAST (OWASP ZAP + testes complementares)
         runs-on: ubuntu-24.04
         needs: validate
         timeout-minutes: 30
@@ -222,161 +222,132 @@ jobs:
             JWT_REFRESH_SECRET: 'dast-test-refresh-secret-CHANGE-ME-123456789'
 
         steps:
-            - uses: actions/checkout@v4
+            - name: Checkout repository
+              uses: actions/checkout@v4
 
-            - uses: actions/setup-node@v4
-              with:
-                  node-version: 22.14.0
-                  cache: npm
-
-            - name: Start API and prepare OpenAPI
+            - name: Prepare DAST evidence
               shell: bash
-              env:
-                  DAST_BASE_URL: http://localhost:3000
-                  DAST_RATE_LIMIT_ATTEMPTS: '30'
               run: |
                   EVIDENCE="$RUNNER_TEMP/experiment-evidence/dast"
                   mkdir -p "$EVIDENCE"
 
-                  echo "125" > "$EVIDENCE/compose-up-exit-code.txt"
-                  echo "125" > "$EVIDENCE/zap-exit-code.txt"
-                  echo "125" > "$EVIDENCE/complementary-exit-code.txt"
+                  # O container do ZAP utiliza um usuário sem privilégios de root.
+                  # O diretório montado precisa permitir a gravação dos relatórios.
+                  chmod 777 "$EVIDENCE"
+
+            - name: Start API
+              shell: bash
+              run: |
+                  EVIDENCE="$RUNNER_TEMP/experiment-evidence/dast"
 
                   set +e
-                  docker compose up --build -d > "$EVIDENCE/compose-up.txt" 2>&1
-                  compose_code=$?
+                  docker compose up --build -d \
+                    > "$EVIDENCE/docker-compose-up.txt" 2>&1
+                  result=$?
                   set -e
 
-                  echo "$compose_code" > "$EVIDENCE/compose-up-exit-code.txt"
-                  cat "$EVIDENCE/compose-up.txt"
+                  echo "$result" > "$EVIDENCE/docker-compose-up-exit-code.txt"
+                  cat "$EVIDENCE/docker-compose-up.txt"
 
-                  if [ "$compose_code" -ne 0 ]; then
-                    docker compose ps -a > "$EVIDENCE/compose-diagnostics.txt" 2>&1 || true
-                    docker compose logs --no-color --tail=200 \
-                      >> "$EVIDENCE/compose-diagnostics.txt" 2>&1 || true
-                    exit 1
+                  if [ "$result" -ne 0 ]; then
+                    exit "$result"
                   fi
 
+            - name: Wait for API and prepare OpenAPI
+              shell: bash
+              run: |
+                  EVIDENCE="$RUNNER_TEMP/experiment-evidence/dast"
+                  ready=0
+
                   for attempt in {1..30}; do
-                    if curl -fsS "$DAST_BASE_URL/health" >/dev/null && \
-                      curl -fsS "$DAST_BASE_URL/openapi.json" \
-                        -o "$EVIDENCE/openapi-runtime.json" && \
-                      jq -e 'type == "object" and .openapi != null and (.paths | type == "object")' \
-                        "$EVIDENCE/openapi-runtime.json" >/dev/null; then
-
-                      jq 'if (.servers | type) == "array" and (.servers | length) > 0
-                          then .servers[0].url = "http://host.docker.internal:3000" | .servers = [ .servers[0] ]
-                          else .servers = [{"url":"http://host.docker.internal:3000"}]
-                          end' \
-                        "$EVIDENCE/openapi-runtime.json" > "$EVIDENCE/openapi-for-zap.json"
-
-                      if jq -e 'type == "object" and .openapi != null and (.paths | type == "object")' \
-                        "$EVIDENCE/openapi-for-zap.json" >/dev/null; then
-                        echo "prepared" > "$EVIDENCE/openapi-status.txt"
-                        break
-                      fi
+                    if curl -fsS http://localhost:3000/health >/dev/null &&
+                      curl -fsS http://localhost:3000/openapi.json \
+                        -o "$EVIDENCE/openapi-runtime.json" &&
+                      jq -e '
+                        type == "object" and
+                        .openapi != null and
+                        (.paths | type == "object")
+                      ' "$EVIDENCE/openapi-runtime.json" >/dev/null; then
+                      ready=1
+                      break
                     fi
+
                     sleep 2
                   done
 
-                  if [ ! -s "$EVIDENCE/openapi-for-zap.json" ]; then
-                    echo "OpenAPI indisponível ou inválido após 30 tentativas." \
-                      > "$EVIDENCE/openapi-error.txt"
-                    curl -sS -i "$DAST_BASE_URL/health" \
-                      >> "$EVIDENCE/openapi-error.txt" 2>&1 || true
-                    docker compose ps -a \
-                      >> "$EVIDENCE/openapi-error.txt" 2>&1 || true
-                    docker compose logs --no-color --tail=200 \
-                      >> "$EVIDENCE/openapi-error.txt" 2>&1 || true
-                    echo "unavailable-or-invalid" > "$EVIDENCE/openapi-status.txt"
+                  if [ "$ready" -ne 1 ]; then
+                    echo "A API não ficou pronta ou não forneceu uma OpenAPI válida."
+                    docker compose logs > "$EVIDENCE/api-logs.txt" 2>&1 || true
                     exit 1
                   fi
 
-            - name: Run OWASP ZAP
-              if: always()
+                  # Ajusta a URL para que o container do ZAP alcance a API no host.
+                  jq '
+                    .servers = [{"url": "http://host.docker.internal:3000"}]
+                  ' "$EVIDENCE/openapi-runtime.json" \
+                    > "$EVIDENCE/openapi-for-zap.json"
+
+                  test -s "$EVIDENCE/openapi-for-zap.json"
+
+            - name: Run OWASP ZAP API scan
               shell: bash
               run: |
                   EVIDENCE="$RUNNER_TEMP/experiment-evidence/dast"
-                  mkdir -p "$EVIDENCE"
-
-                  if [ ! -s "$EVIDENCE/openapi-for-zap.json" ]; then
-                    echo "OpenAPI ausente; ZAP não executado." > "$EVIDENCE/zap-console.txt"
-                    exit 1
-                  fi
 
                   set +e
                   docker run --rm \
                     --add-host=host.docker.internal:host-gateway \
-                    -v "$EVIDENCE:/zap/wrk/:rw" \
+                    -v "$EVIDENCE:/zap/wrk:rw" \
                     ghcr.io/zaproxy/zaproxy:2.16.1 \
                     zap-api-scan.py \
-                    -t /zap/wrk/openapi-for-zap.json \
-                    -f openapi \
-                    -J zap-report.json \
-                    -r zap-report.html \
-                    -w zap-report.md \
-                    -I > "$EVIDENCE/zap-console.txt" 2>&1
-                  zap_code=$?
+                      -t /zap/wrk/openapi-for-zap.json \
+                      -f openapi \
+                      -J /zap/wrk/zap-report.json \
+                      -r /zap/wrk/zap-report.html \
+                      -w /zap/wrk/zap-report.md \
+                    > "$EVIDENCE/zap-console.txt" 2>&1
+
+                  result=$?
                   set -e
 
-                  echo "$zap_code" > "$EVIDENCE/zap-exit-code.txt"
+                  echo "$result" > "$EVIDENCE/zap-exit-code.txt"
                   cat "$EVIDENCE/zap-console.txt"
 
-                  if [ ! -s "$EVIDENCE/zap-report.json" ]; then
-                    echo "ZAP não produziu relatório JSON." >&2
-                    exit 1
-                  fi
+                  # A validação final decide se a execução foi concluída corretamente.
+                  # Não interrompe o job antes de preservar as evidências.
+                  exit 0
 
-                  # Preserva o código de saída para a consolidação final.
-                  # Não transforma falhas operacionais em sucesso.
-                  if [ "$zap_code" -gt 2 ]; then
-                    echo "ZAP falhou operacionalmente (código $zap_code)." >&2
-                    exit 1
-                  fi
-
-            - name: Run complementary tests RS01-RS07
-              if: always()
+            - name: Run complementary security tests RS01-RS07
               shell: bash
               env:
-                  DAST_BASE_URL: http://localhost:3000
-                  DAST_REPORT_PATH: ${{ runner.temp }}/experiment-evidence/dast/dast-rs01-rs07-report.json
-                  DAST_RATE_LIMIT_ATTEMPTS: '30'
+                  DAST_REPORT_PATH: ${{ runner.temp }}/experiment-evidence/dast/complementary-report.json
+                  DAST_RATE_LIMIT_ATTEMPTS: '20'
               run: |
                   EVIDENCE="$RUNNER_TEMP/experiment-evidence/dast"
-                  mkdir -p "$EVIDENCE"
-
-                  if [ ! -s "$EVIDENCE/openapi-for-zap.json" ]; then
-                    echo "OpenAPI ausente; testes complementares não executados." \
-                      > "$EVIDENCE/complementary-console.txt"
-                    exit 1
-                  fi
 
                   set +e
                   node --experimental-strip-types \
                     workflows_support/dast-rs01-rs07.test.ts \
                     > "$EVIDENCE/complementary-console.txt" 2>&1
-                  complementary_code=$?
+
+                  result=$?
                   set -e
 
-                  echo "$complementary_code" > "$EVIDENCE/complementary-exit-code.txt"
+                  echo "$result" > "$EVIDENCE/complementary-exit-code.txt"
                   cat "$EVIDENCE/complementary-console.txt"
 
-                  if [ ! -s "$DAST_REPORT_PATH" ]; then
-                    echo "Relatório dos testes complementares ausente." >&2
-                    exit 1
-                  fi
+                  # O resultado será validado depois que os arquivos forem preservados.
+                  exit 0
 
-                  if [ "$complementary_code" -gt 1 ]; then
-                    echo "Falha operacional nos testes complementares (código $complementary_code)." >&2
-                    exit 1
-                  fi
-
-            - name: Record DAST metadata and hashes
+            - name: Capture DAST metadata and logs
               if: always()
               shell: bash
               run: |
                   EVIDENCE="$RUNNER_TEMP/experiment-evidence/dast"
                   mkdir -p "$EVIDENCE"
+
+                  docker compose logs \
+                    > "$EVIDENCE/api-logs.txt" 2>&1 || true
 
                   {
                     echo "run_id=$GITHUB_RUN_ID"
@@ -387,14 +358,26 @@ jobs:
                     echo "npm=$(npm --version 2>&1 || true)"
                     echo "docker=$(docker --version 2>&1 || true)"
                     echo "zap_image=ghcr.io/zaproxy/zaproxy:2.16.1"
+                    docker image inspect ghcr.io/zaproxy/zaproxy:2.16.1 \
+                      --format '{{index .RepoDigests 0}}' 2>/dev/null || true
                   } > "$EVIDENCE/environment.txt"
 
-                  cp .github/workflows/experiment.yml "$EVIDENCE/experiment.yml" 2>/dev/null || true
-                  cp workflows_support/dast-rs01-rs07.test.ts "$EVIDENCE/" 2>/dev/null || true
-                  cp docker-compose.yml "$EVIDENCE/" 2>/dev/null || cp compose.yml "$EVIDENCE/" 2>/dev/null || true
-                  [ ! -f Dockerfile ] || cp Dockerfile "$EVIDENCE/"
+                  cp .github/workflows/experiment.yml "$EVIDENCE/" 2>/dev/null || true
+                  cp workflows_support/dast-rs01-rs07.test.ts \
+                    "$EVIDENCE/" 2>/dev/null || true
 
-                  find "$EVIDENCE" -maxdepth 1 -type f ! -name evidence-sha256.txt \
+                  if [ -f Dockerfile ]; then
+                    cp Dockerfile "$EVIDENCE/"
+                  fi
+
+                  if [ -f docker-compose.yml ]; then
+                    cp docker-compose.yml "$EVIDENCE/"
+                  elif [ -f compose.yml ]; then
+                    cp compose.yml "$EVIDENCE/"
+                  fi
+
+                  find "$EVIDENCE" -maxdepth 1 -type f \
+                    ! -name 'evidence-sha256.txt' \
                     -print0 | sort -z | xargs -0 -r sha256sum \
                     > "$EVIDENCE/evidence-sha256.txt"
 
@@ -407,8 +390,61 @@ jobs:
                   if-no-files-found: warn
                   retention-days: 1
 
+            - name: Validate DAST execution and reports
+              if: always()
+              shell: bash
+              run: |
+                  EVIDENCE="$RUNNER_TEMP/experiment-evidence/dast"
+                  errors=0
+
+                  for file in \
+                    docker-compose-up-exit-code.txt \
+                    zap-exit-code.txt \
+                    complementary-exit-code.txt; do
+
+                    path="$EVIDENCE/$file"
+
+                    if [ ! -f "$path" ]; then
+                      echo "::error::Evidência ausente: $file"
+                      errors=1
+                      continue
+                    fi
+
+                    code="$(cat "$path")"
+
+                    if [ "$code" != "0" ]; then
+                      echo "::error::A etapa $file terminou com código $code"
+                      errors=1
+                    fi
+                  done
+
+                  for file in \
+                    openapi-for-zap.json \
+                    zap-report.json \
+                    zap-report.html \
+                    complementary-report.json; do
+
+                    if [ ! -s "$EVIDENCE/$file" ]; then
+                      echo "::error::Relatório ausente ou vazio: $file"
+                      errors=1
+                    fi
+                  done
+
+                  if [ -s "$EVIDENCE/complementary-report.json" ]; then
+                    if ! jq -e '
+                      .summary != null and
+                      .summary.infrastructureErrors == 0
+                    ' "$EVIDENCE/complementary-report.json" >/dev/null; then
+                      echo "::error::Testes complementares não concluídos corretamente."
+                      errors=1
+                    fi
+                  fi
+
+                  exit "$errors"
+
             - name: Stop API
               if: always()
+              shell: bash
               run: docker compose down --volumes --remove-orphans
 
     consolidate:
