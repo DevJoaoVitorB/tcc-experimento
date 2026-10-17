@@ -1,447 +1,438 @@
 name: Authentication API Experiment
 
 on:
-  workflow_dispatch:
+    workflow_dispatch:
+        inputs:
+            group:
+                description: 'Grupo do experimento'
+                required: true
+                type: choice
+                options: [A, B]
 
 permissions:
-  contents: read
+    contents: read
 
 jobs:
-  # 1. Valida a aplicação e registra as versões/arquivos usados no experimento.
-  validate:
-    name: Validate Application
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
+    # 1. Validação funcional e captura do ambiente.
+    validate:
+        name: Validate Application
+        runs-on: ubuntu-24.04
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22.14.0
+                  cache: npm
+            - name: Validate application
+              env:
+                  DATABASE_URL: 'file:./test.db'
+              run: |
+                  npm ci
+                  npx prisma generate
+                  npm test -- --exclude "workflows_support/dast-rs01-rs07.test.ts"
+                  npm run build
+            - name: Capture validation evidence
+              if: always()
+              shell: bash
+              run: |
+                  mkdir -p evidence
+                  {
+                    echo "run_id=$GITHUB_RUN_ID"
+                    echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+                    echo "commit=$GITHUB_SHA"
+                    echo "ref=$GITHUB_REF"
+                    echo "runner_os=$RUNNER_OS"
+                    echo "runner_arch=$RUNNER_ARCH"
+                    echo "node=$(node --version 2>&1 || true)"
+                    echo "npm=$(npm --version 2>&1 || true)"
+                    echo "docker=$(docker --version 2>&1 || true)"
+                    echo "node_version_requested=22.14.0"
+                    echo "commands=npm ci; npx prisma generate; npm test; npm run build"
+                  } > evidence/environment.txt
+                  for file in package.json package-lock.json AGENTS.md .github/workflows/experiment.yml workflows_support/sast-rs01-rs07.rules.yml workflows_support/dast-rs01-rs07.test.ts docker-compose.yml compose.yml Dockerfile; do
+                    [ ! -f "$file" ] || sha256sum "$file" >> evidence/input-sha256.txt
+                  done
+            - name: Upload raw validation evidence
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: raw-validate-${{ inputs.group }}
+                  path: evidence/
+                  if-no-files-found: warn
+                  retention-days: 90
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.14.0
-          cache: npm
+    # 2. SAST: mantém as regras Semgrep e o relatório original com severidades nativas.
+    sast:
+        name: SAST (Semgrep)
+        runs-on: ubuntu-24.04
+        needs: validate
+        steps:
+            - uses: actions/checkout@v4
+            - name: Run Semgrep
+              shell: bash
+              run: |
+                  mkdir -p evidence
+                  set +e
+                  docker run --rm -v "$PWD:/src:ro" -v "$PWD/evidence:/reports:rw" -w /src \
+                    semgrep/semgrep:1.178.0 semgrep scan \
+                    --config p/security-audit --config p/secrets --config p/owasp-top-ten \
+                    --config p/javascript --config p/typescript --config p/nodejs --config p/jwt \
+                    --config /src/workflows_support/sast-rs01-rs07.rules.yml \
+                    --json --output /reports/sast-report.json . > evidence/sast-console.txt 2>&1
+                  code=$?
+                  echo "$code" > evidence/sast-exit-code.txt
+                  set -e
+                  cat evidence/sast-console.txt
+                  # Código 1 indica achados; outros códigos diferentes de 0/1 indicam erro operacional.
+                  if [ "$code" != "0" ] && [ "$code" != "1" ]; then
+                    echo "Semgrep terminou com erro operacional (código $code)." >&2
+                    exit 1
+                  fi
+            - name: Capture SAST configuration
+              if: always()
+              shell: bash
+              run: |
+                  mkdir -p evidence
+                  docker run --rm semgrep/semgrep:1.178.0 semgrep --version > evidence/semgrep-version.txt 2>&1 || true
+                  cp workflows_support/sast-rs01-rs07.rules.yml evidence/ 2>/dev/null || true
+                  cp .github/workflows/experiment.yml evidence/experiment.yml 2>/dev/null || true
+                  {
+                    echo "run_id=$GITHUB_RUN_ID"
+                    echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+                    echo "commit=$GITHUB_SHA"
+                    echo "ref=$GITHUB_REF"
+                    echo "runner_os=$RUNNER_OS"
+                    echo "image=semgrep/semgrep:1.178.0"
+                    echo "configs=p/security-audit;p/secrets;p/owasp-top-ten;p/javascript;p/typescript;p/nodejs;p/jwt;workflows_support/sast-rs01-rs07.rules.yml"
+                  } > evidence/environment.txt
+            - name: Upload raw SAST evidence
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: raw-sast-${{ inputs.group }}
+                  path: evidence/
+                  if-no-files-found: warn
+                  retention-days: 90
 
-      - name: Validate application
+    # 3. SCA: audita todas as dependências e apenas as de produção.
+    sca:
+        name: SCA (npm audit)
+        runs-on: ubuntu-24.04
+        needs: validate
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22.14.0
+                  cache: npm
+            - name: Audit dependencies
+              shell: bash
+              run: |
+                  mkdir -p evidence
+                  npm ci
+                  # npm audit pode retornar código diferente de zero por vulnerabilidades; preserva os relatórios.
+                  set +e
+                  npm audit --json > evidence/sca-report-all.json 2> evidence/sca-stderr-all.txt
+                  echo "$?" > evidence/npm-audit-all-exit-code.txt
+                  npm audit --omit=dev --json > evidence/sca-report-production.json 2> evidence/sca-stderr-production.txt
+                  echo "$?" > evidence/npm-audit-production-exit-code.txt
+                  set -e
+                  {
+                    echo "run_id=$GITHUB_RUN_ID"
+                    echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+                    echo "commit=$GITHUB_SHA"
+                    echo "ref=$GITHUB_REF"
+                    echo "runner_os=$RUNNER_OS"
+                    echo "node=$(node --version 2>&1 || true)"
+                    echo "npm=$(npm --version 2>&1 || true)"
+                    echo "commands=npm audit --json; npm audit --omit=dev --json"
+                  } > evidence/environment.txt
+                  cp package.json package-lock.json evidence/
+                  sha256sum package.json package-lock.json > evidence/dependency-files-sha256.txt
+            - name: Upload raw SCA evidence
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: raw-sca-${{ inputs.group }}
+                  path: evidence/
+                  if-no-files-found: warn
+                  retention-days: 90
+
+    # 4. DAST: inicia a API, prepara o OpenAPI e executa ZAP + testes RS01–RS07.
+    dast:
+        name: DAST (OWASP ZAP + Complementary Tests)
+        runs-on: ubuntu-24.04
+        needs: validate
+        timeout-minutes: 30
         env:
-          DATABASE_URL: "file:./test.db"
-        run: |
-          npm ci
-          npx prisma generate
-          npm test -- --exclude "workflows_support/dast-rs01-rs07.test.ts"
-          npm run build
+            JWT_ACCESS_SECRET: 'dast-test-access-secret-CHANGE-ME-123456789'
+            JWT_REFRESH_SECRET: 'dast-test-refresh-secret-CHANGE-ME-123456789'
+        steps:
+            - uses: actions/checkout@v4
+            - name: Start API and prepare OpenAPI
+              shell: bash
+              env:
+                  DAST_BASE_URL: http://localhost:3000
+                  DAST_REPORT_PATH: ${{ runner.temp }}/dast-evidence/dast-rs01-rs07-report.json
+                  DAST_RATE_LIMIT_ATTEMPTS: '30'
+              run: |
+                  mkdir -p "$RUNNER_TEMP/dast-evidence"
+                  EVIDENCE="$RUNNER_TEMP/dast-evidence"
+                  echo 125 > "$EVIDENCE/zap-exit-code.txt"
+                  echo 125 > "$EVIDENCE/complementary-exit-code.txt"
+                  set +e
+                  docker compose up --build -d > "$EVIDENCE/compose-up.txt" 2>&1
+                  code=$?
+                  echo "$code" > "$EVIDENCE/compose-up-exit-code.txt"
+                  set -e
+                  cat "$EVIDENCE/compose-up.txt"
+                  if [ "$code" -eq 0 ]; then
+                    for attempt in {1..30}; do
+                      if curl -fsS http://localhost:3000/health >/dev/null && \
+                         curl -fsS http://localhost:3000/openapi.json -o "$EVIDENCE/openapi-runtime.json" && \
+                         jq -e 'type == "object" and .openapi != null and (.paths | type == "object")' "$EVIDENCE/openapi-runtime.json" >/dev/null; then
+                        jq 'if (.servers | type) == "array" and (.servers | length) > 0 then .servers[0].url = "http://host.docker.internal:3000" | .servers = [.servers[0]] else .servers = [{"url":"http://host.docker.internal:3000"}] end' \
+                          "$EVIDENCE/openapi-runtime.json" > "$EVIDENCE/openapi-for-zap.json"
+                        break
+                      fi
+                      sleep 2
+                    done
+                  fi
+                  if [ ! -f "$EVIDENCE/openapi-for-zap.json" ]; then
+                    {
+                      echo "OpenAPI ausente ou inválido após até 30 tentativas."
+                      docker compose ps -a 2>&1 || true
+                      docker compose logs --no-color --tail=200 2>&1 || true
+                    } > "$EVIDENCE/openapi-error.txt"
+                  fi
+            - name: Run ZAP and complementary tests
+              if: always()
+              shell: bash
+              env:
+                  DAST_BASE_URL: http://localhost:3000
+                  DAST_REPORT_PATH: ${{ runner.temp }}/dast-evidence/dast-rs01-rs07-report.json
+                  DAST_RATE_LIMIT_ATTEMPTS: '30'
+              run: |
+                  EVIDENCE="$RUNNER_TEMP/dast-evidence"
+                  if [ -f "$EVIDENCE/openapi-for-zap.json" ]; then
+                    set +e
+                    docker run --rm --add-host=host.docker.internal:host-gateway \
+                      -v "$EVIDENCE:/zap/wrk:ro" -v "$EVIDENCE:/zap/reports:rw" \
+                      ghcr.io/zaproxy/zaproxy:2.16.1 zap-api-scan.py \
+                      -t /zap/wrk/openapi-for-zap.json -f openapi \
+                      -r /zap/reports/dast-report.html -J /zap/reports/dast-report.json \
+                      -w /zap/reports/dast-report.md -I > "$EVIDENCE/zap-console.txt" 2>&1
+                    echo "$?" > "$EVIDENCE/zap-exit-code.txt"
+                    node --experimental-strip-types workflows_support/dast-rs01-rs07.test.ts \
+                      > "$EVIDENCE/complementary-console.txt" 2>&1
+                    echo "$?" > "$EVIDENCE/complementary-exit-code.txt"
+                    set -e
+                  else
+                    echo skipped > "$EVIDENCE/zap-status.txt"
+                    echo skipped > "$EVIDENCE/complementary-status.txt"
+                  fi
+            - name: Capture DAST configuration and hashes
+              if: always()
+              shell: bash
+              run: |
+                  EVIDENCE="$RUNNER_TEMP/dast-evidence"
+                  mkdir -p "$EVIDENCE"
+                  {
+                    echo "run_id=$GITHUB_RUN_ID"
+                    echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+                    echo "commit=$GITHUB_SHA"
+                    echo "ref=$GITHUB_REF"
+                    echo "runner_os=$RUNNER_OS"
+                    echo "node=$(node --version 2>&1 || true)"
+                    echo "npm=$(npm --version 2>&1 || true)"
+                    echo "docker=$(docker --version 2>&1 || true)"
+                    echo "zap_image=ghcr.io/zaproxy/zaproxy:2.16.1"
+                    echo "zap_image_digest=$(docker image inspect ghcr.io/zaproxy/zaproxy:2.16.1 --format '{{index .RepoDigests 0}}' 2>/dev/null || true)"
+                    echo "api_base_url=http://localhost:3000"
+                    echo "openapi_url=http://localhost:3000/openapi.json"
+                    echo "complementary_test=workflows_support/dast-rs01-rs07.test.ts"
+                    echo "DAST_RATE_LIMIT_ATTEMPTS=30"
+                  } > "$EVIDENCE/environment.txt"
+                  cp .github/workflows/experiment.yml "$EVIDENCE/experiment.yml" 2>/dev/null || true
+                  cp workflows_support/dast-rs01-rs07.test.ts "$EVIDENCE/" 2>/dev/null || true
+                  cp workflows_support/sast-rs01-rs07.rules.yml "$EVIDENCE/" 2>/dev/null || true
+                  cp docker-compose.yml "$EVIDENCE/" 2>/dev/null || cp compose.yml "$EVIDENCE/" 2>/dev/null || true
+                  [ ! -f Dockerfile ] || cp Dockerfile "$EVIDENCE/"
+                  find "$EVIDENCE" -maxdepth 1 -type f ! -name evidence-sha256.txt -print0 | sort -z | xargs -0 -r sha256sum > "$EVIDENCE/evidence-sha256.txt"
+            - name: Upload raw DAST evidence
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: raw-dast-${{ inputs.group }}
+                  path: ${{ runner.temp }}/dast-evidence/
+                  if-no-files-found: warn
+                  retention-days: 90
+            - name: Check DAST execution status
+              if: always()
+              shell: bash
+              run: |
+                  EVIDENCE="$RUNNER_TEMP/dast-evidence"
+                  errors=0
+                  for file in compose-up-exit-code.txt zap-exit-code.txt complementary-exit-code.txt; do
+                    if [ ! -f "$EVIDENCE/$file" ] || [ "$(cat "$EVIDENCE/$file")" != "0" ]; then
+                      echo "Etapa ausente, não executada ou com erro: $file"
+                      errors=1
+                    fi
+                  done
+                  [ -f "$EVIDENCE/openapi-for-zap.json" ] || errors=1
+                  exit "$errors"
+            - name: Stop API
+              if: always()
+              run: docker compose down --volumes --remove-orphans
 
-      # Guarda metadados e hashes para identificar exatamente a execução do experimento.
-      - name: Record run metadata
+    # 5. Empacota os resultados: quatro JSONs de evidência e um relatório Markdown.
+    package-evidence:
+        name: Package evidence and generate analysis
+        runs-on: ubuntu-24.04
         if: always()
-        shell: bash
-        run: |
-          mkdir -p evidence
-          {
-            printf 'run_id=%s\nrun_attempt=%s\ncommit=%s\nrunner_os=%s\n' \
-              "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$GITHUB_SHA" "$RUNNER_OS"
-            printf 'node=%s\nnpm=%s\ndocker=%s\n' \
-              "$(node --version 2>&1 || true)" \
-              "$(npm --version 2>&1 || true)" \
-              "$(docker --version 2>&1 || true)"
-            printf 'checkout_action=actions/checkout@v4\nsetup_node_action=actions/setup-node@v4\nupload_artifact_action=actions/upload-artifact@v4\n'
-          } > evidence/environment.txt
-          for file in \
-            package.json package-lock.json AGENTS.md .github/workflows/experiment.yml \
-            workflows_support/sast-rs01-rs07.rules.yml \
-            workflows_support/dast-rs01-rs07.test.ts \
-            docker-compose.yml compose.yml Dockerfile
-          do
-            if [ -f "$file" ]; then sha256sum "$file" >> evidence/input-sha256.txt; fi
-          done
+        needs: [validate, sast, sca, dast]
+        steps:
+            - uses: actions/checkout@v4
+            - name: Download raw evidence
+              uses: actions/download-artifact@v4
+              with:
+                  pattern: raw-*-${{ inputs.group }}
+                  path: downloaded
+                  merge-multiple: false
+              continue-on-error: true
+            - name: Build final documents
+              env:
+                  GROUP: ${{ inputs.group }}
+                  VALIDATE_STATUS: ${{ needs.validate.result }}
+                  SAST_STATUS: ${{ needs.sast.result }}
+                  SCA_STATUS: ${{ needs.sca.result }}
+                  DAST_STATUS: ${{ needs.dast.result }}
+              run: |
+                  python3 - <<'PY'
+                  import os, json
+                  from pathlib import Path
+                  from datetime import datetime, timezone
 
-      - name: Upload validation evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: validate-evidence
-          path: evidence/
-          if-no-files-found: warn
-          retention-days: 90
+                  source, target = Path("downloaded"), Path("results")
+                  target.mkdir(exist_ok=True)
+                  group = os.environ["GROUP"]
+                  run = {"group": group, "run_id": os.getenv("GITHUB_RUN_ID"),
+                         "run_attempt": os.getenv("GITHUB_RUN_ATTEMPT"), "commit": os.getenv("GITHUB_SHA"),
+                         "ref": os.getenv("GITHUB_REF"), "generated_at_utc": datetime.now(timezone.utc).isoformat()}
+                  jobs = {"validate": ("VALIDATE", os.getenv("VALIDATE_STATUS", "unknown")),
+                          "sast": ("SAST", os.getenv("SAST_STATUS", "unknown")),
+                          "sca": ("SCA", os.getenv("SCA_STATUS", "unknown")),
+                          "dast": ("DAST", os.getenv("DAST_STATUS", "unknown"))}
 
-  # 2. SAST: mantém relatório completo e inventário com regra, arquivo, linha e severidade.
-  sast:
-    name: SAST (Semgrep)
-    runs-on: ubuntu-24.04
-    needs: validate
-    steps:
-      - uses: actions/checkout@v4
+                  def read(path):
+                      data = path.read_bytes()
+                      try: return {"format": "json", "content": json.loads(data.decode())}
+                      except Exception: return {"format": "text", "content": data.decode(errors="replace")}
+                  def content(files, name):
+                      return files.get(name, {}).get("content")
+                  def exit_code(files, name):
+                      value = content(files, name)
+                      try: return int(value.strip())
+                      except (ValueError, AttributeError): return None
 
-      - name: Run Semgrep
-        shell: bash
-        run: |
-          mkdir -p evidence
-          set +e
-          docker run --rm -v "$PWD:/src:ro" -v "$PWD/evidence:/reports:rw" -w /src \
-            semgrep/semgrep:1.178.0 semgrep scan \
-            --config p/security-audit --config p/secrets --config p/owasp-top-ten \
-            --config p/javascript --config p/typescript --config p/nodejs --config p/jwt \
-            --config /src/workflows_support/sast-rs01-rs07.rules.yml \
-            --json --output /reports/sast-report.json . > evidence/sast-console.txt 2>&1
-          code=$?
-          echo "$code" > evidence/sast-exit-code.txt
-          set -e
-          cat evidence/sast-console.txt
-          # Código 1 significa que há achados; códigos diferentes de 0/1 indicam erro de execução.
-          if [ "$code" != "0" ] && [ "$code" != "1" ]; then
-            echo "Semgrep não concluiu corretamente (código $code)." >&2
-            exit 1
-          fi
+                  docs = {}
+                  configs = {
+                    "validate": {"commands": ["npm ci", "npx prisma generate", "npm test", "npm run build"]},
+                    "sast": {"image": "semgrep/semgrep:1.178.0", "configs": ["p/security-audit", "p/secrets", "p/owasp-top-ten", "p/javascript", "p/typescript", "p/nodejs", "p/jwt", "workflows_support/sast-rs01-rs07.rules.yml"]},
+                    "sca": {"commands": ["npm audit --json", "npm audit --omit=dev --json"], "scope": ["all dependencies", "production dependencies"]},
+                    "dast": {"zap_image": "ghcr.io/zaproxy/zaproxy:2.16.1", "target": "http://localhost:3000", "openapi": "http://localhost:3000/openapi.json", "complementary_tests": "workflows_support/dast-rs01-rs07.test.ts", "DAST_RATE_LIMIT_ATTEMPTS": "30"}
+                  }
 
-      - name: Prepare SAST evidence
-        if: always()
-        shell: bash
-        run: |
-          mkdir -p evidence
-          # TSV facilita filtrar manualmente achados de testes/infra sem apagar o relatório bruto.
-          if [ -f evidence/sast-report.json ]; then
-            jq -r '.results[]? | [.check_id, .path, (.start.line // 0 | tostring), (.extra.severity // "UNKNOWN"), (.extra.message // "")] | @tsv' \
-              evidence/sast-report.json > evidence/sast-findings.tsv || true
-          fi
-          docker run --rm semgrep/semgrep:1.178.0 semgrep --version > evidence/semgrep-version.txt 2>&1 || true
-          cp workflows_support/sast-rs01-rs07.rules.yml evidence/ 2>/dev/null || true
-          cp .github/workflows/experiment.yml evidence/experiment.yml 2>/dev/null || true
-          {
-            echo "commit=$GITHUB_SHA"
-            echo "run_id=$GITHUB_RUN_ID"
-          } >> evidence/environment.txt
+                  for job, (kind, status) in jobs.items():
+                      folder = source / f"raw-{job}-{group}"
+                      files = {str(p.relative_to(folder)): read(p) for p in sorted(folder.rglob("*")) if p.is_file()} if folder.exists() else {}
+                      doc = {"metadata": {**run, "analysis_type": kind, "job_status": status, "runner": "ubuntu-24.04"},
+                             "configuration": configs[job], "execution": {"job_status": status}, "raw_evidence": files}
+                      if job == "validate":
+                          doc["metadata"]["tool"] = "npm / Prisma / project tests"
+                          doc["summary"] = {"evidence_files": len(files)}
+                      elif job == "sast":
+                          report = content(files, "sast-report.json") or {}
+                          findings = report.get("results", []) if isinstance(report, dict) else []
+                          severity = {}
+                          for item in findings:
+                              level = (item.get("extra") or {}).get("severity", "UNKNOWN")
+                              severity[level] = severity.get(level, 0) + 1
+                          code = exit_code(files, "sast-exit-code.txt")
+                          doc["metadata"].update(tool="Semgrep", tool_version=content(files, "semgrep-version.txt"))
+                          doc["execution"].update(exit_code=code, status="completed" if code in (0, 1) else "incomplete_or_failed")
+                          doc["summary"] = {"total_findings": len(findings), "native_severity_counts": severity}
+                      elif job == "sca":
+                          all_report = content(files, "sca-report-all.json") or {}
+                          prod_report = content(files, "sca-report-production.json") or {}
+                          def total(report):
+                              return report.get("metadata", {}).get("vulnerabilities", {}).get("total") if isinstance(report, dict) else None
+                          def severities(report):
+                              values = report.get("metadata", {}).get("vulnerabilities", {}) if isinstance(report, dict) else {}
+                              return {key: values.get(key, 0) for key in ("critical", "high", "moderate", "low", "info")}
+                          doc["metadata"].update(tool="npm audit", node_version=content(files, "environment.txt"))
+                          doc["execution"].update(all_exit_code=exit_code(files, "npm-audit-all-exit-code.txt"), production_exit_code=exit_code(files, "npm-audit-production-exit-code.txt"))
+                          doc["summary"] = {"all_dependencies_total": total(all_report), "production_dependencies_total": total(prod_report), "all_dependencies_native_severity": severities(all_report), "production_dependencies_native_severity": severities(prod_report)}
+                      else:
+                          zap = content(files, "dast-report.json") or {}
+                          sites = zap.get("site", []) if isinstance(zap, dict) else []
+                          risks = {}
+                          for site in sites:
+                              for alert in site.get("alerts", []):
+                                  risk = alert.get("riskdesc", "UNKNOWN")
+                                  risks[risk] = risks.get(risk, 0) + 1
+                          test_report = content(files, "dast-rs01-rs07-report.json") or {}
+                          test_results = test_report.get("results", []) if isinstance(test_report, dict) else []
+                          statuses = {}
+                          for result in test_results:
+                              value = result.get("status", "UNKNOWN")
+                              statuses[value] = statuses.get(value, 0) + 1
+                          doc["metadata"]["tools"] = ["OWASP ZAP", "RS01–RS07 complementary tests"]
+                          doc["execution"].update(compose_exit_code=exit_code(files, "compose-up-exit-code.txt"), zap_exit_code=exit_code(files, "zap-exit-code.txt"), complementary_exit_code=exit_code(files, "complementary-exit-code.txt"), status="completed" if "dast-report.json" in files and "dast-rs01-rs07-report.json" in files else "incomplete_or_failed")
+                          doc["summary"] = {"zap_alert_instances": sum(len(s.get("alerts", [])) for s in sites), "zap_native_risk_counts": risks, "complementary_test_status_counts": statuses, "note": "ZAP alerts and complementary test outcomes are kept separate."}
+                      docs[job] = doc
+                      (target / f"evidence-{job}.json").write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
 
-      - name: Upload SAST evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sast-evidence
-          path: evidence/
-          if-no-files-found: warn
-          retention-days: 90
-
-  # 3. SCA: relatório geral inclui dependências de desenvolvimento; o segundo cobre produção.
-  sca:
-    name: SCA (npm audit)
-    runs-on: ubuntu-24.04
-    needs: validate
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.14.0
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Audit dependencies and preserve evidence
-        shell: bash
-        run: |
-          mkdir -p evidence
-          # npm audit pode retornar código diferente de zero por vulnerabilidades; os relatórios são preservados.
-          set +e
-          npm audit --json > evidence/sca-report-all.json 2> evidence/sca-stderr-all.txt
-          echo "$?" > evidence/npm-audit-all-exit-code.txt
-          npm audit --omit=dev --json > evidence/sca-report-production.json 2> evidence/sca-stderr-production.txt
-          echo "$?" > evidence/npm-audit-production-exit-code.txt
-          set -e
-          {
-            echo "run_id=$GITHUB_RUN_ID"
-            echo "commit=$GITHUB_SHA"
-            echo "node=$(node --version 2>&1 || true)"
-            echo "npm=$(npm --version 2>&1 || true)"
-            echo "audit_all=npm audit --json"
-            echo "audit_production=npm audit --omit=dev --json"
-          } > evidence/environment.txt
-          cp package.json package-lock.json evidence/
-          sha256sum package.json package-lock.json > evidence/dependency-files-sha256.txt
-
-      - name: Upload SCA evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: sca-evidence
-          path: evidence/
-          if-no-files-found: warn
-          retention-days: 90
-
-  # 4. DAST: resultados de segurança são dados da pesquisa; erros operacionais reprovam o job.
-  dast:
-    name: DAST (OWASP ZAP + Complementary Tests)
-    runs-on: ubuntu-24.04
-    needs: validate
-    timeout-minutes: 30
-    env:
-      JWT_ACCESS_SECRET: "dast-test-access-secret-CHANGE-ME-123456789"
-      JWT_REFRESH_SECRET: "dast-test-refresh-secret-CHANGE-ME-123456789"
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Start API and prepare OpenAPI
-        shell: bash
-        env:
-          DAST_BASE_URL: http://localhost:3000
-          DAST_REPORT_PATH: ${{ runner.temp }}/dast-evidence/dast-rs01-rs07-report.json
-          DAST_RATE_LIMIT_ATTEMPTS: "30"
-        run: |
-          mkdir -p "$RUNNER_TEMP/dast-evidence"
-          EVIDENCE="$RUNNER_TEMP/dast-evidence"
-
-          echo "125" > "$EVIDENCE/zap-exit-code.txt"
-          echo "125" > "$EVIDENCE/complementary-exit-code.txt"
-          echo "not-run" > "$EVIDENCE/openapi-status.txt"
-
-          set +e
-          docker compose up --build -d > "$EVIDENCE/compose-up.txt" 2>&1
-          compose_code=$?
-          echo "$compose_code" > "$EVIDENCE/compose-up-exit-code.txt"
-          set -e
-          cat "$EVIDENCE/compose-up.txt"
-
-          if [ "$compose_code" -ne 0 ]; then
-            {
-              echo "docker compose up falhou com código $compose_code."
-              docker compose ps -a 2>&1 || true
-              docker compose logs --no-color --tail=200 2>&1 || true
-            } > "$EVIDENCE/compose-diagnostics.txt"
-            exit 1
-          fi
-
-          for attempt in {1..30}; do
-            if curl -fsS http://localhost:3000/health >/dev/null && \
-               curl -fsS http://localhost:3000/openapi.json -o "$EVIDENCE/openapi-runtime.json" && \
-               jq -e 'type == "object" and .openapi != null and (.paths | type == "object")' "$EVIDENCE/openapi-runtime.json" >/dev/null; then
-              jq 'if (.servers | type) == "array" and (.servers | length) > 0 then .servers[0].url = "http://host.docker.internal:3000" | .servers = [ .servers[0] ] else .servers = [{"url":"http://host.docker.internal:3000"}] end' \
-                "$EVIDENCE/openapi-runtime.json" > "$EVIDENCE/openapi-for-zap.json"
-
-              if jq -e 'type == "object" and .openapi != null and (.paths | type == "object")' "$EVIDENCE/openapi-for-zap.json" >/dev/null; then
-                echo "prepared" > "$EVIDENCE/openapi-status.txt"
-                break
-              fi
-              rm -f "$EVIDENCE/openapi-for-zap.json"
-            fi
-            sleep 2
-          done
-
-          if [ ! -s "$EVIDENCE/openapi-for-zap.json" ]; then
-            {
-              echo "OpenAPI não ficou disponível ou válido após 30 tentativas."
-              curl -sS -i --max-time 5 http://localhost:3000/health 2>&1 || true
-              curl -sS -i --max-time 5 http://localhost:3000/openapi.json 2>&1 || true
-              docker compose ps -a 2>&1 || true
-              docker compose logs --no-color --tail=200 2>&1 || true
-            } > "$EVIDENCE/openapi-error.txt"
-            echo "unavailable-or-invalid" > "$EVIDENCE/openapi-status.txt"
-            exit 1
-          fi
-
-      - name: Run ZAP and complementary tests
-        if: always()
-        shell: bash
-        env:
-          DAST_BASE_URL: http://localhost:3000
-          DAST_REPORT_PATH: ${{ runner.temp }}/dast-evidence/dast-rs01-rs07-report.json
-          DAST_RATE_LIMIT_ATTEMPTS: "30"
-        run: |
-          set -euo pipefail
-          EVIDENCE="$RUNNER_TEMP/dast-evidence"
-          mkdir -p "$EVIDENCE"
-
-          if [ ! -s "$EVIDENCE/openapi-for-zap.json" ]; then
-            echo "OpenAPI ausente ou inválido; não é possível executar o DAST." >&2
-            exit 1
-          fi
-
-          # O ZAP pode retornar código diferente de zero por achados.
-          # O relatório e o código são preservados para a análise.
-          set +e
-          docker run --name zap-dast --add-host=host.docker.internal:host-gateway \
-            -v "$EVIDENCE:/zap/wrk:ro" \
-            ghcr.io/zaproxy/zaproxy:2.16.1 zap-api-scan.py \
-            -t /zap/wrk/openapi-for-zap.json -f openapi \
-            -r /tmp/dast-report.html \
-            -J /tmp/dast-report.json \
-            -w /tmp/dast-report.md \
-            -I > "$EVIDENCE/zap-console.txt" 2>&1
-          zap_code=$?
-          echo "$zap_code" > "$EVIDENCE/zap-exit-code.txt"
-
-          if docker container inspect zap-dast >/dev/null 2>&1; then
-            for report in dast-report.html dast-report.json dast-report.md; do
-              docker cp "zap-dast:/tmp/$report" "$EVIDENCE/$report" >> "$EVIDENCE/zap-console.txt" 2>&1
-              echo "$?" > "$EVIDENCE/copy-${report}-exit-code.txt"
-            done
-            docker rm -f zap-dast >/dev/null 2>&1
-          fi
-          set -e
-          cat "$EVIDENCE/zap-console.txt"
-
-          # Códigos 0, 1 e 2 são aceitos somente se o relatório JSON for válido.
-          case "$zap_code" in
-            0|1|2) ;;
-            *)
-              echo "ZAP falhou operacionalmente (código $zap_code)." >&2
-              exit 1
-              ;;
-          esac
-
-          if [ ! -s "$EVIDENCE/dast-report.json" ] || \
-             ! jq -e 'type == "object"' "$EVIDENCE/dast-report.json" >/dev/null 2>&1; then
-            echo "ZAP não gerou um relatório JSON válido." >&2
-            exit 1
-          fi
-
-          # Código 1 pode indicar testes reprovados; só é aceito com relatório válido
-          # e sem erros de infraestrutura registrados pelo próprio script.
-          set +e
-          node --experimental-strip-types workflows_support/dast-rs01-rs07.test.ts \
-            > "$EVIDENCE/complementary-console.txt" 2>&1
-          complementary_code=$?
-          echo "$complementary_code" > "$EVIDENCE/complementary-exit-code.txt"
-          set -e
-          cat "$EVIDENCE/complementary-console.txt"
-
-          case "$complementary_code" in
-            0|1) ;;
-            *)
-              echo "O script complementar falhou durante a execução (código $complementary_code)." >&2
-              exit 1
-              ;;
-          esac
-
-          if [ ! -s "$DAST_REPORT_PATH" ] || \
-             ! jq -e '
-               .summary
-               | type == "object"
-                 and (.passed | type == "number")
-                 and (.failed | type == "number")
-                 and (.notEvaluated | type == "number")
-                 and (.infrastructureErrors | type == "number")
-             ' "$DAST_REPORT_PATH" >/dev/null 2>&1; then
-            echo "Relatório complementar ausente ou inválido." >&2
-            exit 1
-          fi
-
-          infrastructure_errors="$(jq -r '.summary.infrastructureErrors' "$DAST_REPORT_PATH")"
-          if [ "$infrastructure_errors" -ne 0 ]; then
-            echo "Os testes registraram erros de infraestrutura: $infrastructure_errors." >&2
-            exit 1
-          fi
-
-          echo "Avaliação complementar concluída; resultados de segurança preservados no relatório."
-
-      - name: Record DAST metadata and hashes
-        if: always()
-        shell: bash
-        run: |
-          EVIDENCE="$RUNNER_TEMP/dast-evidence"
-          mkdir -p "$EVIDENCE"
-          {
-            echo "run_id=$GITHUB_RUN_ID"
-            echo "run_attempt=$GITHUB_RUN_ATTEMPT"
-            echo "commit=$GITHUB_SHA"
-            echo "runner_os=$RUNNER_OS"
-            echo "node=$(node --version 2>&1 || true)"
-            echo "npm=$(npm --version 2>&1 || true)"
-            echo "docker=$(docker --version 2>&1 || true)"
-            echo "zap_image=ghcr.io/zaproxy/zaproxy:2.16.1"
-            docker image inspect ghcr.io/zaproxy/zaproxy:2.16.1 --format '{{index .RepoDigests 0}}' 2>/dev/null || true
-          } > "$EVIDENCE/environment.txt"
-
-          cp .github/workflows/experiment.yml "$EVIDENCE/experiment.yml" 2>/dev/null || true
-          cp workflows_support/dast-rs01-rs07.test.ts "$EVIDENCE/" 2>/dev/null || true
-          cp docker-compose.yml "$EVIDENCE/" 2>/dev/null || cp compose.yml "$EVIDENCE/" 2>/dev/null || true
-          [ ! -f Dockerfile ] || cp Dockerfile "$EVIDENCE/"
-          find "$EVIDENCE" -maxdepth 1 -type f ! -name evidence-sha256.txt \
-            -print0 | sort -z | xargs -0 -r sha256sum > "$EVIDENCE/evidence-sha256.txt"
-
-      - name: Upload DAST evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: dast-evidence
-          path: ${{ runner.temp }}/dast-evidence/
-          if-no-files-found: warn
-          retention-days: 90
-
-      - name: Check DAST execution status
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          EVIDENCE="$RUNNER_TEMP/dast-evidence"
-          errors=0
-
-          # A API e o OpenAPI são pré-requisitos operacionais.
-          if [ ! -f "$EVIDENCE/compose-up-exit-code.txt" ] || \
-             [ "$(cat "$EVIDENCE/compose-up-exit-code.txt")" != "0" ]; then
-            echo "A API não iniciou corretamente."
-            errors=1
-          fi
-
-          if [ ! -s "$EVIDENCE/openapi-for-zap.json" ] || \
-             ! jq -e 'type == "object" and .openapi != null and (.paths | type == "object")' \
-               "$EVIDENCE/openapi-for-zap.json" >/dev/null 2>&1; then
-            echo "OpenAPI ausente ou inválido."
-            errors=1
-          fi
-
-          # Não reprova por achados do ZAP; exige conclusão e relatório válido.
-          if [ ! -f "$EVIDENCE/zap-exit-code.txt" ]; then
-            echo "Evidência ausente: zap-exit-code.txt"
-            errors=1
-          else
-            zap_code="$(cat "$EVIDENCE/zap-exit-code.txt")"
-            case "$zap_code" in
-              0|1|2)
-                if [ ! -s "$EVIDENCE/dast-report.json" ] || \
-                   ! jq -e 'type == "object"' "$EVIDENCE/dast-report.json" >/dev/null 2>&1; then
-                  echo "Relatório JSON do ZAP ausente ou inválido."
-                  errors=1
-                fi
-                ;;
-              *)
-                echo "ZAP falhou operacionalmente (código $zap_code)."
-                errors=1
-                ;;
-            esac
-          fi
-
-          # Código 1 é aceito quando representa reprovações registradas no relatório.
-          if [ ! -f "$EVIDENCE/complementary-exit-code.txt" ]; then
-            echo "Evidência ausente: complementary-exit-code.txt"
-            errors=1
-          else
-            complementary_code="$(cat "$EVIDENCE/complementary-exit-code.txt")"
-            case "$complementary_code" in
-              0|1)
-                if [ ! -s "$EVIDENCE/dast-rs01-rs07-report.json" ] || \
-                   ! jq -e '
-                     .summary
-                     | type == "object"
-                       and (.passed | type == "number")
-                       and (.failed | type == "number")
-                       and (.notEvaluated | type == "number")
-                       and (.infrastructureErrors | type == "number")
-                   ' "$EVIDENCE/dast-rs01-rs07-report.json" >/dev/null 2>&1; then
-                  echo "Relatório complementar ausente ou inválido."
-                  errors=1
-                elif [ "$(jq -r '.summary.infrastructureErrors' "$EVIDENCE/dast-rs01-rs07-report.json")" -ne 0 ]; then
-                  echo "O relatório complementar indica erros de infraestrutura."
-                  errors=1
-                else
-                  echo "Testes complementares concluídos; reprovações da API são dados de pesquisa."
-                fi
-                ;;
-              *)
-                echo "Script complementar falhou operacionalmente (código $complementary_code)."
-                errors=1
-                ;;
-            esac
-          fi
-
-          exit "$errors"
-
-      - name: Stop API
-        if: always()
-        run: docker compose down --volumes --remove-orphans
+                  # O relatório é por grupo. A redução B/A é calculada na comparação dos dois relatórios.
+                  lines = [f"# Relatório de análise — Grupo {group}", "",
+                           f"- **Execução:** `{run['run_id']}` (tentativa `{run['run_attempt']}`)",
+                           f"- **Commit:** `{run['commit']}`", f"- **Referência:** `{run['ref']}`",
+                           f"- **Gerado (UTC):** `{run['generated_at_utc']}`", "",
+                           "## Resumo dos resultados", ""]
+                  for job, title in [("validate", "Validação"), ("sast", "SAST — Semgrep"), ("sca", "SCA — npm audit"), ("dast", "DAST — OWASP ZAP e testes complementares RS01–RS07")]:
+                      doc, summary = docs[job], docs[job].get("summary", {})
+                      lines += [f"### {title}", "", f"- **Status do job:** `{jobs[job][1]}`"]
+                      if job == "validate":
+                          lines.append(f"- **Arquivos de evidência capturados:** {summary['evidence_files']}")
+                      elif job == "sast":
+                          lines += [f"- **Quantidade de achados:** {summary.get('total_findings', 'não disponível')}", "- **Severidades nativas:** " + (", ".join(f"`{k}`: {v}" for k, v in summary.get("native_severity_counts", {}).items()) or "não disponível")]
+                      elif job == "sca":
+                          lines += [f"- **Achados — todas as dependências:** {summary.get('all_dependencies_total', 'não disponível')}", f"- **Achados — produção:** {summary.get('production_dependencies_total', 'não disponível')}", "- **Severidades nativas:** " + (", ".join(f"`{k}`: {v}" for k, v in summary.get("all_dependencies_native_severity", {}).items()) or "não disponível")]
+                      else:
+                          lines += [f"- **Alertas OWASP ZAP:** {summary.get('zap_alert_instances', 'não disponível')}", "- **Riscos nativos do ZAP:** " + (", ".join(f"`{k}`: {v}" for k, v in summary.get("zap_native_risk_counts", {}).items()) or "não disponível"), "- **Resultados RS01–RS07:** " + (", ".join(f"`{k}`: {v}" for k, v in summary.get("complementary_test_status_counts", {}).items()) or "não disponível"), "- As contagens do ZAP e dos testes complementares permanecem separadas."]
+                          results = (content(docs[job]["raw_evidence"], "dast-rs01-rs07-report.json") or {}).get("results", [])
+                          if results:
+                              lines += ["", "| Teste | Resultado | Detalhes |", "|---|---|---|"]
+                              for result in results:
+                                  cells = [str(result.get(k, "—")).replace("|", "\\|").replace("\n", " ") for k in ("id", "status", "details")]
+                                  lines.append("| " + " | ".join(cells) + " |")
+                      lines.append("")
+                  lines += ["## Análise quantitativa", "",
+                            "Este relatório apresenta um único grupo. A redução percentual geral e específica de SAST, DAST e SCA do Grupo B em relação ao Grupo A deve ser calculada após reunir os relatórios dos dois grupos.",
+                            "O total geral deve seguir uma regra de contagem documentada; alertas do ZAP e resultados RS01–RS07 não são somados automaticamente.", "",
+                            "## Análise de severidade", "",
+                            "As severidades são apresentadas conforme a classificação nativa de cada ferramenta, sem conversão para uma escala comum.", "",
+                            "## Observações e limitações", "",
+                            "- Etapa não executada ou relatório ausente não significa ausência de vulnerabilidades.",
+                            "- Os resultados dos testes complementares não são automaticamente equivalentes a alertas do ZAP.",
+                            "- Configurações, versões, relatórios originais, logs, códigos de saída e hashes disponíveis estão preservados nos JSONs correspondentes.", ""]
+                  (target / "analysis.md").write_text("\n".join(lines), encoding="utf-8")
+                  PY
+            - name: Upload final documents
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: experiment-results-${{ inputs.group }}
+                  path: results/
+                  if-no-files-found: warn
+                  retention-days: 90
