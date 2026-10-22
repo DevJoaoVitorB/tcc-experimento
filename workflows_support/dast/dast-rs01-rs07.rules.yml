@@ -76,10 +76,10 @@ jobs:
     # 4. Executa a análise dinâmica da API.
     - type: activeScan
       parameters:
-          url: http://127.0.0.1:3000
+          url: http://127.0.0.1:3000/health
           context: authentication-api
           defaultStrength: Medium
-          defaultThreshold: Off
+          defaultThreshold: Medium
           maxScanDurationInMins: 15
           maxRuleDurationInMins: 5
           delayInMs: 100
