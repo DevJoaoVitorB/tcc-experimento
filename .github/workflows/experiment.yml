@@ -1,3 +1,4 @@
+
 name: Authentication API Experiment
 
 on:
@@ -44,6 +45,7 @@ jobs:
             - name: Initialize validation evidence
               shell: bash
               run: |
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
                   mkdir -p "$EVIDENCE_DIR"
 
                   {
@@ -67,6 +69,7 @@ jobs:
               shell: bash
               run: |
                   set +e
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
                   npm test 2>&1 | tee "$EVIDENCE_DIR/tests.log"
                   status=${PIPESTATUS[0]}
                   echo "tests_exit_code=$status" >> "$EVIDENCE_DIR/metadata.txt"
@@ -78,6 +81,7 @@ jobs:
               shell: bash
               run: |
                   set +e
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
                   npm run build 2>&1 | tee "$EVIDENCE_DIR/build.log"
                   status=${PIPESTATUS[0]}
                   echo "build_exit_code=$status" >> "$EVIDENCE_DIR/metadata.txt"
@@ -109,6 +113,7 @@ jobs:
             - name: Initialize SAST evidence
               shell: bash
               run: |
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
                   mkdir -p "$EVIDENCE_DIR"
 
                   {
@@ -125,6 +130,7 @@ jobs:
               shell: bash
               run: |
                   set +e
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
 
                   docker run --rm \
                     -v "$GITHUB_WORKSPACE:/src:ro" \
@@ -138,7 +144,7 @@ jobs:
                       --config p/typescript \
                       --config p/nodejs \
                       --config p/jwt \
-                      --config /src/$SAST_PLAN \
+                      --config "/src/$SAST_PLAN" \
                       --json \
                       --output /reports/semgrep-report.json \
                       --exit-code 0 \
@@ -190,6 +196,7 @@ jobs:
             - name: Initialize SCA evidence
               shell: bash
               run: |
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
                   mkdir -p "$EVIDENCE_DIR"
 
                   {
@@ -210,6 +217,7 @@ jobs:
               shell: bash
               run: |
                   set +e
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
 
                   npm audit --json \
                     > "$EVIDENCE_DIR/npm-audit-all.json" \
@@ -232,6 +240,7 @@ jobs:
               shell: bash
               run: |
                   set +e
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
 
                   npm audit --omit=dev --json \
                     > "$EVIDENCE_DIR/npm-audit-production.json" \
@@ -281,6 +290,7 @@ jobs:
             - name: Initialize DAST evidence
               shell: bash
               run: |
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
                   mkdir -p "$EVIDENCE_DIR"
 
                   {
@@ -299,6 +309,7 @@ jobs:
               shell: bash
               run: |
                   set -o pipefail
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
                   docker build --tag "$DAST_IMAGE" . \
                     2>&1 | tee "$EVIDENCE_DIR/docker-build.log"
                   echo "docker_build_exit_code=${PIPESTATUS[0]}" \
@@ -309,6 +320,7 @@ jobs:
               shell: bash
               run: |
                   set -euo pipefail
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
 
                   docker run -d \
                     --name dast-api \
@@ -325,6 +337,7 @@ jobs:
               shell: bash
               run: |
                   set -u
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
                   ready=false
 
                   for attempt in $(seq 1 60); do
@@ -363,6 +376,7 @@ jobs:
               shell: bash
               run: |
                   set +e
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
 
                   docker run --rm \
                     --network host \
@@ -399,6 +413,7 @@ jobs:
               if: always()
               shell: bash
               run: |
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
                   docker logs dast-api \
                     > "$EVIDENCE_DIR/application.log" 2>&1 || true
 
@@ -440,7 +455,6 @@ jobs:
                   REPORTS="analysis/reports"
                   OUTPUT="analysis/analysis.md"
 
-                  # Preserva os relatórios JSON originais com nomes padronizados.
                   copy_report() {
                     local source="$1"
                     local target="$2"
@@ -453,10 +467,10 @@ jobs:
                     fi
                   }
 
-                  copy_report collected/sast-report.json report-sast.json
-                  copy_report collected/sca-report-all.json report-sca-all.json
-                  copy_report collected/sca-report-production.json report-sca-production.json
-                  copy_report collected/dast-report.json report-dast-zap.json
+                  copy_report collected/semgrep-report.json report-sast.json
+                  copy_report collected/npm-audit-all.json report-sca-all.json
+                  copy_report collected/npm-audit-production.json report-sca-production.json
+                  copy_report collected/zap-report.json report-dast-zap.json
                   copy_report collected/dast-rs01-rs07-report.json report-dast-complementary.json
 
                   {
