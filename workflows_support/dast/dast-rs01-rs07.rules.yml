@@ -17,7 +17,7 @@ jobs:
           type: active
           engine: 'ECMAScript : Graal.js'
           name: rs-01-access-control
-          source: /zap/wrk/workflows_support/dast/rs-01-access-control.js
+          source: /zap/wrk/workflows_support/dast/scripts/rs-01-access-control.js
 
     - type: script
       parameters:
@@ -25,7 +25,7 @@ jobs:
           type: active
           engine: 'ECMAScript : Graal.js'
           name: rs-02-security-misconfiguration
-          source: /zap/wrk/workflows_support/dast/rs-02-security-misconfiguration.js
+          source: /zap/wrk/workflows_support/dast/scripts/rs-02-security-misconfiguration.js
 
     - type: script
       parameters:
@@ -33,7 +33,7 @@ jobs:
           type: active
           engine: 'ECMAScript : Graal.js'
           name: rs-04-cryptographic-failures
-          source: /zap/wrk/workflows_support/dast/rs-04-cryptographic-failures.js
+          source: /zap/wrk/workflows_support/dast/scripts/rs-04-cryptographic-failures.js
 
     - type: script
       parameters:
@@ -41,7 +41,7 @@ jobs:
           type: active
           engine: 'ECMAScript : Graal.js'
           name: rs-05-injection
-          source: /zap/wrk/workflows_support/dast/rs-05-injection.js
+          source: /zap/wrk/workflows_support/dast/scripts/rs-05-injection.js
 
     - type: script
       parameters:
@@ -49,7 +49,7 @@ jobs:
           type: active
           engine: 'ECMAScript : Graal.js'
           name: rs-06-authentication-failures
-          source: /zap/wrk/workflows_support/dast/rs-06-authentication-failures.js
+          source: /zap/wrk/workflows_support/dast/scripts/rs-06-authentication-failures.js
 
     - type: script
       parameters:
@@ -57,7 +57,7 @@ jobs:
           type: active
           engine: 'ECMAScript : Graal.js'
           name: rs-07-error-handling
-          source: /zap/wrk/workflows_support/dast/rs-07-error-handling.js
+          source: /zap/wrk/workflows_support/dast/scripts/rs-07-error-handling.js
 
     # 2. Inclui um endpoint protegido na árvore de sites.
     - type: requestor
