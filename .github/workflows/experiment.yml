@@ -1,4 +1,3 @@
-
 name: Authentication API Experiment
 
 on:
@@ -369,6 +368,31 @@ jobs:
                       | tee "$EVIDENCE_DIR/error.txt"
                     exit 1
                   fi
+
+            - name: Verify DAST scripts
+              shell: bash
+              run: |
+                  echo "Workspace: $GITHUB_WORKSPACE"
+                  echo "Arquivos encontrados:"
+                  find "$GITHUB_WORKSPACE/workflows_support/dast" -type f -print
+
+                  for script in \
+                    rs-01-access-control.js \
+                    rs-02-security-misconfiguration.js \
+                    rs-04-cryptographic-failures.js \
+                    rs-05-injection.js \
+                    rs-06-authentication-failures.js \
+                    rs-07-error-handling.js
+                  do
+                    path="$GITHUB_WORKSPACE/workflows_support/dast/scripts/$script"
+
+                    if [ -f "$path" ]; then
+                      echo "OK: $path"
+                    else
+                      echo "::error::Arquivo não encontrado: $path"
+                      exit 1
+                    fi
+                  done
 
             - name: Run OWASP ZAP
               id: zap
