@@ -2,7 +2,7 @@ env:
     contexts:
         - name: authentication-api
           urls:
-              - http://127.0.0.1:3000
+              - http://127.0.0.1:3000/health
           includePaths:
               - http://127\.0\.0\.1:3000/.*
 
@@ -66,14 +66,21 @@ jobs:
             name: Verificar disponibilidade da API
             method: GET
 
-    # 3. Descobre rotas acessíveis antes do Active Scan.
+    # 3. Importa os endpoints documentados no OpenAPI.
+    - type: openapi
+      parameters:
+          apiUrl: http://127.0.0.1:3000/openapi.json
+          context: authentication-api
+          targetUrl: http://127.0.0.1:3000
+
+    # 4. Descobre rotas acessíveis antes do Active Scan.
     - type: spider
       parameters:
           context: authentication-api
           url: http://127.0.0.1:3000/health
           maxDuration: 2
 
-    # 4. Executa a análise dinâmica da API.
+    # 5. Executa a análise dinâmica da API.
     - type: activeScan
       parameters:
           url: http://127.0.0.1:3000/health
@@ -89,12 +96,12 @@ jobs:
           defaultStrength: Medium
           defaultThreshold: Medium
 
-    # 5. Aguarda a conclusão da análise passiva.
+    # 6. Aguarda a conclusão da análise passiva.
     - type: passiveScan-wait
       parameters:
           maxDuration: 5
 
-    # 6. Gera o relatório JSON.
+    # 7. Gera o relatório JSON.
     - type: report
       parameters:
           template: traditional-json
@@ -103,7 +110,7 @@ jobs:
           reportTitle: 'DAST - Authentication API - RS01-RS07'
           reportDescription: 'Resultados da análise dinâmica da API de autenticação.'
 
-    # 7. Gera o relatório HTML.
+    # 8. Gera o relatório HTML.
     - type: report
       parameters:
           template: traditional-html
