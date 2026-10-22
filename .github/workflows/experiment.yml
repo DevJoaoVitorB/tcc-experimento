@@ -147,7 +147,6 @@ jobs:
                       --config "/src/$SAST_PLAN" \
                       --json \
                       --output /reports/semgrep-report.json \
-                      --exit-code 0 \
                       /src 2>&1 | tee "$EVIDENCE_DIR/semgrep.log"
 
                   status=${PIPESTATUS[0]}
