@@ -12,19 +12,19 @@ const UUID = Java.type("java.util.UUID");
 const System = Java.type("java.lang.System");
 var executed = false;
 
-function getMetadata() {
-    return {
-        id: 110101,
-        name: "RS01 - Controle de acesso e autorização",
-        description: "Verifica autenticação, separação de tokens, isolamento entre contas, métodos HTTP e tentativa de elevação de privilégios.",
-        solution: "Aplique autorização no servidor, negue acesso por padrão, valide a finalidade dos tokens e não confie em privilégios enviados pelo cliente.",
-        reference: "https://owasp.org/Top10/",
-        risk: "Medium",
-        confidence: "Medium",
-        cweId: 862,
-        wascId: 0
-    };
-}
+// function getMetadata() {
+//     return {
+//         id: 110101,
+//         name: "RS01 - Controle de acesso e autorização",
+//         description: "Verifica autenticação, separação de tokens, isolamento entre contas, métodos HTTP e tentativa de elevação de privilégios.",
+//         solution: "Aplique autorização no servidor, negue acesso por padrão, valide a finalidade dos tokens e não confie em privilégios enviados pelo cliente.",
+//         reference: "https://owasp.org/Top10/",
+//         risk: "Medium",
+//         confidence: "Medium",
+//         cweId: 862,
+//         wascId: 0
+//     };
+// }
 
 function scan(helper, msg, param, value) {
     if (
