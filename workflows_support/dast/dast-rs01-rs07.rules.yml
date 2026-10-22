@@ -61,12 +61,19 @@ jobs:
 
     # 2. Inclui um endpoint protegido na árvore de sites.
     - type: requestor
-      parameters:
-          user: ''
-          url: http://127.0.0.1:3000/users/me
-          method: GET
+      requests:
+          - url: http://127.0.0.1:3000/
+            name: Verificar disponibilidade da API
+            method: GET
 
-    # 3. Executa a análise dinâmica da API.
+    # 3. Descobre rotas acessíveis antes do Active Scan.
+    - type: spider
+      parameters:
+          context: authentication-api
+          url: http://127.0.0.1:3000
+          maxDuration: 2
+
+    # 4. Executa a análise dinâmica da API.
     - type: activeScan
       parameters:
           url: http://127.0.0.1:3000
@@ -83,12 +90,12 @@ jobs:
           defaultStrength: Medium
           defaultThreshold: Medium
 
-    # 4. Aguarda a conclusão da análise passiva.
+    # 5. Aguarda a conclusão da análise passiva.
     - type: passiveScan-wait
       parameters:
           maxDuration: 5
 
-    # 5. Gera relatórios nativos do ZAP.
+    # 6. Gera o relatório JSON.
     - type: report
       parameters:
           template: traditional-json
@@ -97,6 +104,7 @@ jobs:
           reportTitle: 'DAST - Authentication API - RS01-RS07'
           reportDescription: 'Resultados da análise dinâmica da API de autenticação.'
 
+    # 7. Gera o relatório HTML.
     - type: report
       parameters:
           template: traditional-html
