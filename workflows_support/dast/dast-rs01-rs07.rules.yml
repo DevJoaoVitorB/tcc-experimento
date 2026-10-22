@@ -1,0 +1,107 @@
+
+env:
+  contexts:
+    - name: authentication-api
+      urls:
+        - http://127.0.0.1:3000
+      includePaths:
+        - http://127\.0\.0\.1:3000/.*
+
+  vars:
+    baseUrl: http://127.0.0.1:3000
+
+jobs:
+  # 1. Carrega os scripts customizados de Active Scan.
+  - type: script
+    parameters:
+      action: add
+      type: active
+      engine: ECMAScript : Graal.js
+      name: rs-01-access-control
+      source: /zap/wrk/workflows_support/dast/rs-01-access-control.js
+
+  - type: script
+    parameters:
+      action: add
+      type: active
+      engine: ECMAScript : Graal.js
+      name: rs-02-security-misconfiguration
+      source: /zap/wrk/workflows_support/dast/rs-02-security-misconfiguration.js
+
+  - type: script
+    parameters:
+      action: add
+      type: active
+      engine: ECMAScript : Graal.js
+      name: rs-04-cryptographic-failures
+      source: /zap/wrk/workflows_support/dast/rs-04-cryptographic-failures.js
+
+  - type: script
+    parameters:
+      action: add
+      type: active
+      engine: ECMAScript : Graal.js
+      name: rs-05-injection
+      source: /zap/wrk/workflows_support/dast/rs-05-injection.js
+
+  - type: script
+    parameters:
+      action: add
+      type: active
+      engine: ECMAScript : Graal.js
+      name: rs-06-authentication-failures
+      source: /zap/wrk/workflows_support/dast/rs-06-authentication-failures.js
+
+  - type: script
+    parameters:
+      action: add
+      type: active
+      engine: ECMAScript : Graal.js
+      name: rs-07-error-handling
+      source: /zap/wrk/workflows_support/dast/rs-07-error-handling.js
+
+  # 2. Inclui um endpoint protegido na árvore de sites.
+  - type: requestor
+    parameters:
+      user: ""
+      url: http://127.0.0.1:3000/users/me
+      method: GET
+
+  # 3. Executa a análise dinâmica da API.
+  - type: activeScan
+    parameters:
+      url: http://127.0.0.1:3000
+      context: authentication-api
+      policy: RS01-RS07
+      defaultStrength: Medium
+      defaultThreshold: Medium
+      maxScanDurationInMins: 15
+      maxRuleDurationInMins: 5
+      delayInMs: 100
+      threadPerHost: 2
+      maxAlertsPerRule: 20
+    policyDefinition:
+      defaultStrength: Medium
+      defaultThreshold: Medium
+
+  # 4. Aguarda a conclusão da análise passiva.
+  - type: passiveScan-wait
+    parameters:
+      maxDuration: 5
+
+  # 5. Gera relatórios nativos do ZAP.
+  - type: report
+    parameters:
+      template: traditional-json
+      reportDir: /zap/out
+      reportFile: zap-report.json
+      reportTitle: "DAST - Authentication API - RS01-RS07"
+      reportDescription: "Resultados da análise dinâmica da API de autenticação."
+
+  - type: report
+    parameters:
+      template: traditional-html
+      reportDir: /zap/out
+      reportFile: zap-report.html
+      reportTitle: "DAST - Authentication API - RS01-RS07"
+      reportDescription: "Resultados da análise dinâmica da API de autenticação."
