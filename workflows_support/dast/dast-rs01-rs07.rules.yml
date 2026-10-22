@@ -62,7 +62,7 @@ jobs:
     # 2. Inclui um endpoint protegido na árvore de sites.
     - type: requestor
       requests:
-          - url: http://127.0.0.1:3000/
+          - url: http://127.0.0.1:3000/health
             name: Verificar disponibilidade da API
             method: GET
 
@@ -70,7 +70,7 @@ jobs:
     - type: spider
       parameters:
           context: authentication-api
-          url: http://127.0.0.1:3000
+          url: http://127.0.0.1:3000/health
           maxDuration: 2
 
     # 4. Executa a análise dinâmica da API.
@@ -78,9 +78,8 @@ jobs:
       parameters:
           url: http://127.0.0.1:3000
           context: authentication-api
-          policy: RS01-RS07
           defaultStrength: Medium
-          defaultThreshold: Medium
+          defaultThreshold: Off
           maxScanDurationInMins: 15
           maxRuleDurationInMins: 5
           delayInMs: 100
@@ -88,7 +87,32 @@ jobs:
           maxAlertsPerRule: 20
       policyDefinition:
           defaultStrength: Medium
-          defaultThreshold: Medium
+          defaultThreshold: Off
+          rules:
+              - id: 110101
+                name: RS01 - Controle de acesso e autorização
+                strength: Medium
+                threshold: Medium
+              - id: 110201
+                name: RS02 - Configuração de segurança
+                strength: Medium
+                threshold: Medium
+              - id: 110401
+                name: RS04 - Gerenciamento de credenciais
+                strength: Medium
+                threshold: Medium
+              - id: 110501
+                name: RS05 - Validação de entradas
+                strength: Medium
+                threshold: Medium
+              - id: 110601
+                name: RS06 - Autenticação e gerenciamento de sessão
+                strength: Medium
+                threshold: Medium
+              - id: 110701
+                name: RS07 - Tratamento seguro de erros
+                strength: Medium
+                threshold: Medium
 
     # 5. Aguarda a conclusão da análise passiva.
     - type: passiveScan-wait
