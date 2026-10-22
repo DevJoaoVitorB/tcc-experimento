@@ -377,12 +377,12 @@ jobs:
                   find "$GITHUB_WORKSPACE/workflows_support/dast" -type f -print
 
                   for script in \
-                    rs-01-access-control.js \
-                    rs-02-security-misconfiguration.js \
-                    rs-04-cryptographic-failures.js \
-                    rs-05-injection.js \
-                    rs-06-authentication-failures.js \
-                    rs-07-error-handling.js
+                    rs01-access-control.js \
+                    rs02-security-configuration.js \
+                    rs04-credential-management.js \
+                    rs05-input-validation.js \
+                    rs06-authentication-protection.js \
+                    rs07-exception-handling.js
                   do
                     path="$GITHUB_WORKSPACE/workflows_support/dast/scripts/$script"
 

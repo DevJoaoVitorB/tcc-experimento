@@ -16,48 +16,48 @@ jobs:
           action: add
           type: active
           engine: 'ECMAScript : Graal.js'
-          name: rs-01-access-control
-          source: /zap/wrk/workflows_support/dast/scripts/rs-01-access-control.js
+          name: rs01-access-control
+          source: /zap/wrk/workflows_support/dast/scripts/rs01-access-control.js
 
     - type: script
       parameters:
           action: add
           type: active
           engine: 'ECMAScript : Graal.js'
-          name: rs-02-security-misconfiguration
-          source: /zap/wrk/workflows_support/dast/scripts/rs-02-security-misconfiguration.js
+          name: rs02-security-configuration
+          source: /zap/wrk/workflows_support/dast/scripts/rs02-security-configuration.js
 
     - type: script
       parameters:
           action: add
           type: active
           engine: 'ECMAScript : Graal.js'
-          name: rs-04-cryptographic-failures
-          source: /zap/wrk/workflows_support/dast/scripts/rs-04-cryptographic-failures.js
+          name: rs04-credential-management
+          source: /zap/wrk/workflows_support/dast/scripts/rs04-credential-management.js
 
     - type: script
       parameters:
           action: add
           type: active
           engine: 'ECMAScript : Graal.js'
-          name: rs-05-injection
-          source: /zap/wrk/workflows_support/dast/scripts/rs-05-injection.js
+          name: rs05-input-validation
+          source: /zap/wrk/workflows_support/dast/scripts/rs05-input-validation.js
 
     - type: script
       parameters:
           action: add
           type: active
           engine: 'ECMAScript : Graal.js'
-          name: rs-06-authentication-failures
-          source: /zap/wrk/workflows_support/dast/scripts/rs-06-authentication-failures.js
+          name: rs06-authentication-protection
+          source: /zap/wrk/workflows_support/dast/scripts/rs06-authentication-protection.js
 
     - type: script
       parameters:
           action: add
           type: active
           engine: 'ECMAScript : Graal.js'
-          name: rs-07-error-handling
-          source: /zap/wrk/workflows_support/dast/scripts/rs-07-error-handling.js
+          name: rs07-exception-handling
+          source: /zap/wrk/workflows_support/dast/scripts/rs07-exception-handling.js
 
     # 2. Inclui um endpoint protegido na árvore de sites.
     - type: requestor
