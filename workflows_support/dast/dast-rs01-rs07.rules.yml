@@ -87,32 +87,7 @@ jobs:
           maxAlertsPerRule: 20
       policyDefinition:
           defaultStrength: Medium
-          defaultThreshold: Off
-          rules:
-              - id: 110101
-                name: RS01 - Controle de acesso e autorização
-                strength: Medium
-                threshold: Medium
-              - id: 110201
-                name: RS02 - Configuração de segurança
-                strength: Medium
-                threshold: Medium
-              - id: 110401
-                name: RS04 - Gerenciamento de credenciais
-                strength: Medium
-                threshold: Medium
-              - id: 110501
-                name: RS05 - Validação de entradas
-                strength: Medium
-                threshold: Medium
-              - id: 110601
-                name: RS06 - Autenticação e gerenciamento de sessão
-                strength: Medium
-                threshold: Medium
-              - id: 110701
-                name: RS07 - Tratamento seguro de erros
-                strength: Medium
-                threshold: Medium
+          defaultThreshold: Medium
 
     # 5. Aguarda a conclusão da análise passiva.
     - type: passiveScan-wait

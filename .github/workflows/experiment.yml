@@ -401,6 +401,9 @@ jobs:
                   set +e
                   EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
 
+                  mkdir -p "$EVIDENCE_DIR"
+                  chmod -R 777 "$EVIDENCE_DIR"
+
                   docker run --rm \
                     --network host \
                     --volume "$GITHUB_WORKSPACE:/zap/wrk:ro" \
