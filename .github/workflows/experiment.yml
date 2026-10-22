@@ -463,14 +463,25 @@ jobs:
         if: ${{ always() }}
 
         steps:
-            - uses: actions/checkout@v4
+            - name: Checkout repository
+              uses: actions/checkout@v4
 
             - name: Download security evidence
               uses: actions/download-artifact@v4
               with:
-                  pattern: '*-evidence'
+                  pattern: '*-evidence-*'
                   path: collected
                   merge-multiple: true
+
+            - name: Inspect downloaded evidence
+              shell: bash
+              run: |
+                  echo "Arquivos recebidos dos artefatos:"
+                  if [ -d collected ]; then
+                    find collected -type f -print | sort
+                  else
+                    echo "::warning::Diretório collected não foi criado."
+                  fi
 
             - name: Generate consolidated analysis report
               shell: bash
@@ -489,7 +500,7 @@ jobs:
                       cp "$source" "$REPORTS/$target"
                       echo "Incluído: $target"
                     else
-                      echo "Relatório ausente ou inválido: $source"
+                      echo "::warning::Relatório ausente ou inválido: $source"
                     fi
                   }
 
@@ -508,6 +519,7 @@ jobs:
                     echo "- Execução: \`$GITHUB_RUN_ID\`"
                     echo "- Tentativa: \`$GITHUB_RUN_ATTEMPT\`"
                     echo "- Commit: \`$GITHUB_SHA\`"
+                    echo "- Grupo experimental: \`${{ inputs.experiment_group }}\`"
                     echo "- Data UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
                     echo
 
@@ -560,7 +572,13 @@ jobs:
                       jq -r '
                         "| Métrica | Quantidade |",
                         "|---|---:|",
-                        "| Alertas | \([.site[]?.alerts[]?] | length) |"
+                        "| Alertas registrados | \([.site[]?.alerts[]?] | length) |",
+                        "",
+                        "| Risco reportado | Quantidade |",
+                        "|---|---:|",
+                        ([.site[]?.alerts[]?.riskdesc // "Desconhecido"]
+                          | sort | group_by(.)[]
+                          | "| \(.[0]) | \(length) |")
                       ' "$REPORTS/report-dast-zap.json"
                     else
                       echo "Relatório JSON do ZAP ausente ou inválido."
@@ -592,8 +610,9 @@ jobs:
                     echo "- A ausência de relatório não significa ausência de vulnerabilidades."
                     echo "- Os achados devem ser interpretados conforme os critérios de cada ferramenta."
                     echo "- SAST, SCA e DAST são análises distintas; seus totais não devem ser somados automaticamente."
-                    echo "- Os JSON originais preservam os detalhes para auditoria."
+                    echo "- Os relatórios JSON originais são preservados para auditoria."
                     echo
+
                     echo "## Relatórios JSON incluídos"
                     echo
                     found=false
@@ -609,6 +628,37 @@ jobs:
 
                   cat "$OUTPUT"
 
+            - name: Collect original logs and metadata
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  mkdir -p analysis/evidence
+
+                  if [ -d collected ]; then
+                    find collected -type f \
+                      \( -name '*.log' -o -name 'metadata.txt' -o -name 'error*.txt' \) \
+                      -print0 |
+                    while IFS= read -r -d '' file; do
+                      relative="${file#collected/}"
+                      mkdir -p "analysis/evidence/$(dirname "$relative")"
+                      cp "$file" "analysis/evidence/$relative"
+                    done
+                  fi
+
+            - name: Package consolidated analysis
+              shell: bash
+              run: |
+                  set -euo pipefail
+
+                  zip -r analysis/analysis.zip \
+                    analysis/analysis.md \
+                    analysis/reports \
+                    analysis/evidence
+
+                  echo "Conteúdo do pacote:"
+                  unzip -l analysis/analysis.zip
+
             - name: Upload consolidated analysis
               if: always()
               uses: actions/upload-artifact@v4
@@ -616,6 +666,8 @@ jobs:
                   name: analysis-evidence
                   path: |
                       analysis/analysis.md
-                      analysis/reports/report-*.json
+                      analysis/analysis.zip
+                      analysis/reports/
+                      analysis/evidence/
                   if-no-files-found: warn
                   retention-days: 90
