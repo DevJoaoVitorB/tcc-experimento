@@ -27,15 +27,15 @@ var executed = false;
 
 function getMetadata() {
     return ScanRuleMetadata.fromYaml(`
-        id: 110201,
-        name: "RS02 - Security misconfiguration",
-        description: "Verifica vazamento de detalhes internos, cabeçalhos HTTP, CORS, exposição de caminhos sensíveis e aceitação de JWT assinado com segredos comuns.",
-        solution: "Remova detalhes internos das respostas, configure cabeçalhos HTTP e CORS de forma segura, impeça acesso a arquivos internos e use segredos JWT fortes e externos ao código-fonte.",
-        reference: "https://owasp.org/Top10/",
-        risk: "Medium",
-        confidence: "Medium",
-        cweId: 16,
-        wascId: 0
+id: 110201
+name: RS02 - Security misconfiguration
+description: Verifica vazamento de detalhes internos, cabeçalhos HTTP, CORS, exposição de caminhos sensíveis e aceitação de JWT assinado com segredos comuns.
+solution: Remova detalhes internos das respostas, configure cabeçalhos HTTP e CORS de forma segura, impeça acesso a arquivos internos e use segredos JWT fortes e externos ao código-fonte.
+reference: https://owasp.org/Top10/
+risk: MEDIUM
+confidence: MEDIUM
+cweId: 16
+wascId: 0
     `);
 }
 

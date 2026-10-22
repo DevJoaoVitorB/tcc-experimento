@@ -19,18 +19,15 @@ var executed = false;
 
 function getMetadata() {
     return ScanRuleMetadata.fromYaml(`
-        id: 110701,
-        name: "RS07 - Tratamento seguro de erros",
-        description:
-            "Verifica exposição de detalhes internos e erros HTTP 5xx em respostas da API.",
-        solution:
-            "Implemente tratamento centralizado de exceções. Retorne mensagens genéricas " +
-            "ao cliente e registre detalhes técnicos apenas nos logs internos.",
-        reference: "https://owasp.org/Top10/",
-        risk: "Medium",
-        confidence: "Medium",
-        cweId: 209,
-        wascId: 0
+id: 110701
+name: RS07 - Tratamento seguro de erros
+description: Verifica exposição de detalhes internos e erros HTTP 5xx em respostas da API.
+solution: Implemente tratamento centralizado de exceções. Retorne mensagens genéricas ao cliente e registre detalhes técnicos apenas nos logs internos.
+reference: https://owasp.org/Top10/
+risk: MEDIUM
+confidence: MEDIUM
+cweId: 209
+wascId: 0
     `);
 }
 

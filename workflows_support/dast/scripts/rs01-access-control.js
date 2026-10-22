@@ -17,15 +17,15 @@ var executed = false;
 
 function getMetadata() {
     return ScanRuleMetadata.fromYaml(`
-        id: 110101,
-        name: "RS01 - Controle de acesso e autorização",
-        description: "Verifica autenticação, separação de tokens, isolamento entre contas, métodos HTTP e tentativa de elevação de privilégios.",
-        solution: "Aplique autorização no servidor, negue acesso por padrão, valide a finalidade dos tokens e não confie em privilégios enviados pelo cliente.",
-        reference: "https://owasp.org/Top10/",
-        risk: "Medium",
-        confidence: "Medium",
-        cweId: 862,
-        wascId: 0
+id: 110101
+name: RS01 - Controle de acesso e autorização
+description: Verifica autenticação, separação de tokens, isolamento entre contas, métodos HTTP e tentativa de elevação de privilégios.
+solution: Aplique autorização no servidor, negue acesso por padrão, valide a finalidade dos tokens e não confie em privilégios enviados pelo cliente.
+reference: https://owasp.org/Top10/
+risk: MEDIUM
+confidence: MEDIUM
+cweId: 862
+wascId: 0
     `);
 }
 

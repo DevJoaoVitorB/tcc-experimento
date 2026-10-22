@@ -24,19 +24,15 @@ var executed = false;
 
 function getMetadata() {
     return ScanRuleMetadata.fromYaml(`
-        id: 110601,
-        name: "RS06 - Autenticação e gerenciamento de sessão",
-        description:
-            "Verifica rejeição de tokens inválidos, autenticação, enumeração de contas e invalidação de refresh tokens.",
-        solution:
-            "Valide assinatura, algoritmo, validade e finalidade dos tokens. " +
-            "Aplique mensagens de autenticação consistentes e invalide sessões " +
-            "e refresh tokens após logout ou rotação.",
-        reference: "https://owasp.org/Top10/",
-        risk: "High",
-        confidence: "Medium",
-        cweId: 287,
-        wascId: 0
+id: 110601
+name: RS06 - Autenticação e gerenciamento de sessão
+description: Verifica rejeição de tokens inválidos, autenticação, enumeração de contas e invalidação de refresh tokens.
+solution: Valide assinatura, algoritmo, validade e finalidade dos tokens. Aplique mensagens de autenticação consistentes e invalide sessões e refresh tokens após logout ou rotação.
+reference: https://owasp.org/Top10/
+risk: HIGH
+confidence: MEDIUM
+cweId: 287
+wascId: 0
     `);
 }
 

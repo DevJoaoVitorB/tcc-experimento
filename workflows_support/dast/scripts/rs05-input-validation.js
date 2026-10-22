@@ -26,15 +26,15 @@ var executed = false;
 
 function getMetadata() {
     return ScanRuleMetadata.fromYaml(`
-        id: 110501,
-        name: "RS05 - Validação de entrada",
-        description: "Verifica se a API rejeita entradas inválidas, formatos inadequados e corpos de requisição excessivamente grandes.",
-        solution: "Valide tipo, formato, tamanho e limites de cada campo no servidor. Rejeite JSON malformado e tipos de conteúdo não suportados.",
-        reference: "https://owasp.org/Top10/",
-        risk: "Medium",
-        confidence: "Medium",
-        cweId: 20,
-        wascId: 20
+id: 110501
+name: RS05 - Validação de entrada
+description: Verifica se a API rejeita entradas inválidas, formatos inadequados e corpos de requisição excessivamente grandes.
+solution: Valide tipo, formato, tamanho e limites de cada campo no servidor. Rejeite JSON malformado e tipos de conteúdo não suportados.
+reference: https://owasp.org/Top10/
+risk: MEDIUM
+confidence: MEDIUM
+cweId: 20
+wascId: 20
     `);
 }
 

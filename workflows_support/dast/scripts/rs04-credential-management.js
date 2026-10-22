@@ -26,15 +26,15 @@ var executed = false;
 
 function getMetadata() {
     return ScanRuleMetadata.fromYaml(`
-        id: 110401,
-        name: "RS04 - Gerenciamento seguro de credenciais",
-        description: "Verifica se respostas HTTP expõem senhas, hashes de senha ou campos específicos de credenciais.",
-        solution: "Nunca retorne senhas, hashes ou tokens internos de credenciais nas respostas. Armazene senhas com algoritmos de hashing apropriados, como Argon2id, bcrypt ou scrypt.",
-        reference: "https://owasp.org/Top10/",
-        risk: "High",
-        confidence: "Medium",
-        cweId: 522,
-        wascId: 0
+id: 110401
+name: RS04 - Gerenciamento seguro de credenciais
+description: Verifica se respostas HTTP expõem senhas, hashes de senha ou campos específicos de credenciais.
+solution: Nunca retorne senhas, hashes ou tokens internos de credenciais nas respostas. Armazene senhas com algoritmos de hashing apropriados, como Argon2id, bcrypt ou scrypt.
+reference: https://owasp.org/Top10/
+risk: HIGH
+confidence: MEDIUM
+cweId: 522
+wascId: 0
     `);
 }
 
