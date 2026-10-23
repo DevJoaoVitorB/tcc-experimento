@@ -1,18 +1,11 @@
 /*
- * RS05 — Validação de entrada
- * OWASP ZAP Active Scan script (ECMAScript / Graal.js).
+ * RS07 — Tratamento seguro de erros
+ * OWASP ZAP Active Scan Script
  *
- * Base: testRs05() em dast-rs01-rs07.test.ts.
+ * Base: testRs07() de dast-rs01-rs07.test.ts
  *
- * Cenários:
- * - Payloads inválidos definidos em INVALID_PAYLOADS.
- * - Cadastro com senha vazia ou de um caractere.
- * - Cadastro com senha, e-mail ou nome de 10.000 caracteres.
- * - Login com Content-Type text/plain.
- * - JSON malformado.
- * - Corpo de requisição de aproximadamente 1,1 MB.
- *
- * Somente FAIL gera alerta nativo do ZAP.
+ * Executa os cenários quando o Active Scan alcançar /auth/login.
+ * Confirme a compatibilidade com a versão do ZAP do pipeline.
  */
 
 const URI = Java.type('org.apache.commons.httpclient.URI');
@@ -26,37 +19,33 @@ var executed = false;
 
 function getMetadata() {
     return ScanRuleMetadata.fromYaml(`
-id: 110501
-name: RS05 - Validação de entrada
-description: Verifica se a API rejeita entradas inválidas, formatos inadequados e corpos de requisição excessivamente grandes.
-solution: Valide tipo, formato, tamanho e limites de cada campo no servidor. Rejeite JSON malformado e tipos de conteúdo não suportados.
+id: 110701
+name: RS07 - Tratamento seguro de erros
+description: Verifica exposição de detalhes internos e erros HTTP 5xx em respostas da API.
+solution: Implemente tratamento centralizado de exceções. Retorne mensagens genéricas ao cliente e registre detalhes técnicos apenas nos logs internos.
 reference: https://owasp.org/Top10/
 risk: MEDIUM
 confidence: MEDIUM
-cweId: 20
-wascId: 20
+cweId: 209
+wascId: 0
     `);
 }
 
 function scan(helper, msg, param, value) {
     if (executed) return;
 
-    // Inicia na primeira requisição da API; os testes exercitam as rotas de autenticação.
+    // Inicia na primeira requisição do contexto, sem depender da ordem do spider.
     executed = true;
 
     try {
-        runRs05(helper, msg, getBaseUrl(msg));
+        runRs07(helper, msg, getBaseUrl(msg));
     } catch (e) {
-        print(
-            '[RS05] INFRA_ERROR (não classificado como vulnerabilidade): ' +
-                String(e),
-        );
+        print('[RS07] INFRA_ERROR: ' + String(e));
     }
 }
 
 function getBaseUrl(msg) {
     var configured = String(System.getenv('DAST_BASE_URL') || '');
-
     if (configured) return configured.replace(/\/+$/, '');
 
     var u = msg.getRequestHeader().getURI();
@@ -78,8 +67,8 @@ function randomHex() {
 
 function registerBody(overrides) {
     var body = {
-        name: 'DAST Test User',
-        email: 'dast-rs05-' + randomHex() + '@example.invalid',
+        name: 'DAST RS07 User',
+        email: 'dast-rs07-' + randomHex() + '@example.invalid',
         password: 'Dast-' + randomHex() + '!',
     };
 
@@ -100,7 +89,6 @@ function send(helper, original, base, method, route, options) {
 
     message.getRequestHeader().setMethod(method);
     message.getRequestHeader().setURI(target);
-
     message
         .getRequestHeader()
         .setHeader(
@@ -108,7 +96,6 @@ function send(helper, original, base, method, route, options) {
             target.getHost() +
                 (target.getPort() > 0 ? ':' + target.getPort() : ''),
         );
-
     message.getRequestHeader().setHeader('Authorization', '');
 
     if (options.token) {
@@ -117,40 +104,24 @@ function send(helper, original, base, method, route, options) {
             .setHeader('Authorization', 'Bearer ' + options.token);
     }
 
-    if (options.contentType) {
-        message
-            .getRequestHeader()
-            .setHeader('Content-Type', options.contentType);
-    }
+    var body = '';
 
     if (options.rawBody !== undefined) {
-        message.setRequestBody(options.rawBody);
-
-        if (options.contentType) {
-            message
-                .getRequestHeader()
-                .setHeader('Content-Type', options.contentType);
-        }
-
-        message
-            .getRequestHeader()
-            .setHeader('Content-Length', String(options.rawBody.length));
+        body = options.rawBody;
     } else if (options.body !== undefined) {
-        var body = JSON.stringify(options.body);
+        body = JSON.stringify(options.body);
+    }
 
-        message.setRequestBody(body);
+    message.setRequestBody(body);
+    message.getRequestHeader().setHeader('Content-Length', String(body.length));
+
+    if (options.rawBody !== undefined || options.body !== undefined) {
         message
             .getRequestHeader()
             .setHeader(
                 'Content-Type',
                 options.contentType || 'application/json',
             );
-        message
-            .getRequestHeader()
-            .setHeader('Content-Length', String(body.length));
-    } else {
-        message.setRequestBody('');
-        message.getRequestHeader().setHeader('Content-Length', '0');
     }
 
     helper.sendAndReceive(message, false, false);
@@ -162,213 +133,249 @@ function send(helper, original, base, method, route, options) {
     };
 }
 
-function expectedRejection(status, expected) {
-    if (expected.indexOf(status) >= 0) {
-        return 'PASS';
-    }
-
-    if (
-        (status >= 200 && status < 300) ||
-        status >= 500 ||
-        [401, 403, 409].indexOf(status) >= 0
-    ) {
-        return 'FAIL';
-    }
-
-    if ([400, 404, 405, 413, 415, 422, 429].indexOf(status) >= 0) {
-        return 'NOT_EVALUATED';
-    }
-
-    return 'FAIL';
+function leaksInternalDetails(text) {
+    return /stack trace|node_modules|\/app\/|\/home\/|prisma\.|SQLITE_ERROR|SQLITE_[A-Z_]+|DATABASE_URL|JWT_(ACCESS|REFRESH)_SECRET|PrismaClient\w*Error|\bP20\d\d\b|Unique constraint failed|SyntaxError|JsonWebTokenError|TokenExpiredError|jwt malformed|\bat\s+(?:async\s+)?[\w.<>$]+\s+\([^)]*:\d+:\d+\)|\.(?:ts|js):\d+:\d+/i.test(
+        text || '',
+    );
 }
 
-function createAlert(helper, response, test, expected, evidence) {
+function exposesFrameworkDefaults(text) {
+    return /Cannot (GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) \//.test(
+        text || '',
+    );
+}
+
+function createAlert(helper, response, test, evidence) {
     helper
         .newAlert()
         .setRisk(2)
         .setConfidence(2)
-        .setName('RS05 - ' + test)
+        .setName('RS07 - ' + test)
         .setDescription(
-            'A API não rejeitou uma entrada inválida conforme o cenário RS05.',
+            'A resposta da API revelou detalhes internos ou retornou um erro 5xx inesperado.',
         )
         .setUri(String(response.message.getRequestHeader().getURI().toString()))
         .setParam(test)
-        .setAttack(evidence)
-        .setEvidence('HTTP ' + response.status)
+        .setEvidence(evidence)
         .setOtherInfo(
-            'Esperado: HTTP ' +
-                expected.join(', ') +
-                '. Recebido: HTTP ' +
+            'HTTP ' +
                 response.status +
-                '.',
+                '. Verifique o corpo da resposta e os logs do servidor.',
         )
         .setSolution(
-            'Implemente validação de entrada no servidor, com regras explícitas ' +
-                'para tipo, formato e tamanho dos dados. Rejeite conteúdo malformado ' +
-                'e aplique limites ao corpo das requisições.',
+            'Trate exceções de forma centralizada, retorne mensagens genéricas ' +
+                'e evite expor stack traces, caminhos locais, detalhes do banco de ' +
+                'dados ou informações internas do framework.',
         )
         .setReference('https://owasp.org/Top10/')
-        .setCweId(20)
+        .setCweId(209)
         .setMessage(response.message)
         .raise();
 }
 
-function check(helper, response, test, expected, detail) {
-    var status = expectedRejection(response.status, expected);
+function check(helper, response, test, framework) {
+    var leaked =
+        leaksInternalDetails(response.text) ||
+        (framework && exposesFrameworkDefaults(response.text));
 
-    print(
-        '[RS05] ' +
-            test +
-            ' => ' +
-            status +
-            '; HTTP ' +
-            response.status +
-            '; ' +
-            detail,
-    );
+    var serverError = response.status >= 500;
+    var failed = leaked || serverError;
 
-    if (status === 'FAIL') {
-        createAlert(helper, response, test, expected, detail);
+    var result = failed ? 'FAIL' : 'PASS';
+    var detail =
+        'HTTP ' +
+        response.status +
+        '; detalhes internos ' +
+        (leaked ? 'detectados' : 'não detectados') +
+        (serverError ? '; erro HTTP 5xx inesperado' : '');
+
+    print('[RS07] ' + test + ' => ' + result + '; ' + detail);
+
+    if (failed) {
+        createAlert(
+            helper,
+            response,
+            test,
+            'HTTP ' +
+                response.status +
+                (leaked ? '; possível vazamento de detalhes internos' : '') +
+                (serverError ? '; erro 5xx' : ''),
+        );
     }
 }
 
-function runRs05(helper, trigger, base) {
-    var cases = [
-        {
-            label: 'Cadastro com senha vazia',
-            route: '/auth/register',
-            body: registerBody({ password: '' }),
-            expected: [400, 422],
-        },
-        {
-            label: 'Cadastro com senha de 1 caractere',
-            route: '/auth/register',
-            body: registerBody({ password: '1' }),
-            expected: [400, 422],
-        },
-        {
-            label: 'Cadastro com senha de 10.000 caracteres',
-            route: '/auth/register',
-            body: registerBody({
-                password: new Array(10001).join('A'),
-            }),
-            expected: [400, 413, 422],
-        },
-        {
-            label: 'Cadastro com e-mail de 10.000 caracteres',
-            route: '/auth/register',
-            body: registerBody({
-                email: new Array(10001).join('a') + '@example.invalid',
-            }),
-            expected: [400, 413, 422],
-        },
-        {
-            label: 'Cadastro com nome de 10.000 caracteres',
-            route: '/auth/register',
-            body: registerBody({
-                name: new Array(10001).join('A'),
-            }),
-            expected: [400, 413, 422],
-        },
-    ];
-
-    /*
-     * Os payloads abaixo reproduzem classes de entrada inválida.
-     * A lista INVALID_PAYLOADS original não está embutida neste script;
-     * compare-a com o TypeScript antes de afirmar equivalência integral.
-     */
+function runRs07(helper, original, base) {
     var invalidPayloads = [
         {
-            label: 'Cadastro com corpo JSON nulo',
             route: '/auth/register',
-            body: null,
-            expected: [400, 415, 422],
+            label: 'Cadastro sem campos',
+            body: {},
         },
         {
-            label: 'Cadastro com tipos de campos incorretos',
             route: '/auth/register',
+            label: 'Cadastro com tipos inválidos',
             body: {
                 name: { invalid: true },
-                email: 12345,
+                email: 123,
                 password: ['invalid'],
             },
-            expected: [400, 415, 422],
         },
         {
-            label: 'Login com tipos de campos incorretos',
             route: '/auth/login',
+            label: 'Login sem campos',
+            body: {},
+        },
+        {
+            route: '/auth/login',
+            label: 'Login com tipos inválidos',
             body: {
-                email: { invalid: true },
-                password: ['invalid'],
+                email: null,
+                password: { invalid: true },
             },
-            expected: [400, 415, 422],
+        },
+        {
+            route: '/auth/login',
+            label: 'Login com objeto de filtro no e-mail',
+            body: {
+                email: { contains: '@' },
+                password: 'Senha-Incorreta-123!',
+            },
+        },
+        {
+            route: '/auth/refresh',
+            label: 'Refresh sem campos',
+            body: {},
+        },
+        {
+            route: '/auth/refresh',
+            label: 'Refresh com tipo inválido',
+            body: {
+                refreshToken: { invalid: true },
+            },
         },
     ];
 
-    cases = invalidPayloads.concat(cases);
+    var scenarios = [
+        {
+            name: 'Erro de login',
+            run: function () {
+                return send(helper, original, base, 'POST', '/auth/login', {
+                    body: {
+                        email: 'ausente-' + randomHex() + '@example.invalid',
+                        password: 'Senha-Incorreta-123!',
+                    },
+                });
+            },
+        },
+    ];
 
-    cases.forEach(function (test) {
-        var response = send(helper, trigger, base, 'POST', test.route, {
-            body: test.body,
+    invalidPayloads.forEach(function (test) {
+        scenarios.push({
+            name: test.label,
+            run: function () {
+                return send(helper, original, base, 'POST', test.route, {
+                    body: test.body,
+                });
+            },
+        });
+    });
+
+    scenarios.push({
+        name: 'JSON malformado',
+        run: function () {
+            return send(helper, original, base, 'POST', '/auth/login', {
+                rawBody: '{"email": "x", "password":',
+                contentType: 'application/json',
+            });
+        },
+    });
+
+    scenarios.push({
+        name: 'Corpo acima do limite',
+        run: function () {
+            return send(helper, original, base, 'POST', '/auth/login', {
+                body: {
+                    email: 'a@example.invalid',
+                    password: new Array(1100001).join('A'),
+                },
+            });
+        },
+    });
+
+    scenarios.push({
+        name: 'Rota inexistente',
+        framework: true,
+        run: function () {
+            return send(
+                helper,
+                original,
+                base,
+                'GET',
+                '/rota-inexistente-' + randomHex(),
+                {},
+            );
+        },
+    });
+
+    scenarios.forEach(function (test) {
+        try {
+            var response = test.run();
+            check(
+                helper,
+                response,
+                test.name + ' não revela detalhes internos',
+                !!test.framework,
+            );
+        } catch (e) {
+            print('[RS07] INFRA_ERROR - ' + test.name + ': ' + String(e));
+        }
+    });
+
+    // Cadastro duplicado: usa a mesma conta temporária criada aqui.
+    var account = registerBody();
+
+    var registration = send(helper, original, base, 'POST', '/auth/register', {
+        body: account,
+    });
+
+    if ([200, 201, 202].indexOf(registration.status) < 0) {
+        print(
+            '[RS07] Cadastro duplicado => NOT_EVALUATED; ' +
+                'preparação HTTP ' +
+                registration.status,
+        );
+    } else {
+        var duplicate = send(helper, original, base, 'POST', '/auth/register', {
+            body: account,
+        });
+
+        if (duplicate.status === 429) {
+            print(
+                '[RS07] Cadastro duplicado => NOT_EVALUATED; rate limit HTTP 429.',
+            );
+        } else {
+            check(
+                helper,
+                duplicate,
+                'Cadastro duplicado não revela detalhes internos nem retorna 5xx',
+                false,
+            );
+        }
+    }
+
+    // Tokens inválidos: verifica vazamento e erros 5xx.
+    var tokens = ['token.invalido', 'a.b.c'];
+
+    tokens.forEach(function (token) {
+        var response = send(helper, original, base, 'GET', '/users/me', {
+            token: token,
         });
 
         check(
             helper,
             response,
-            test.label + ' é rejeitado',
-            test.expected,
-            'Esperada rejeição da entrada inválida.',
+            'Token inválido não revela detalhes internos nem retorna 5xx',
+            false,
         );
     });
-
-    // Login com Content-Type text/plain.
-    var plain = send(helper, trigger, base, 'POST', '/auth/login', {
-        rawBody: JSON.stringify({
-            email: 'dast-rs05@example.invalid',
-            password: 'Dast-Invalid-123!',
-        }),
-        contentType: 'text/plain',
-    });
-
-    check(
-        helper,
-        plain,
-        'Login com Content-Type text/plain não é aceito',
-        [400, 415, 422],
-        'Esperado 400, 415 ou 422.',
-    );
-
-    // JSON malformado.
-    var malformed = send(helper, trigger, base, 'POST', '/auth/login', {
-        rawBody: '{"email": "x", "password":',
-        contentType: 'application/json',
-    });
-
-    check(
-        helper,
-        malformed,
-        'JSON malformado é rejeitado',
-        [400, 415, 422],
-        'Esperado 400, 415 ou 422.',
-    );
-
-    // Corpo de aproximadamente 1,1 MB.
-    var oversizedBody = JSON.stringify({
-        name: 'DAST Test User',
-        email: 'dast-rs05-oversized@example.invalid',
-        password: new Array(1100001).join('A'),
-    });
-
-    var oversized = send(helper, trigger, base, 'POST', '/auth/register', {
-        rawBody: oversizedBody,
-        contentType: 'application/json',
-    });
-
-    check(
-        helper,
-        oversized,
-        'Corpo acima do limite é rejeitado',
-        [400, 413, 422],
-        'Corpo de aproximadamente 1,1 MB; esperada rejeição por tamanho.',
-    );
 }

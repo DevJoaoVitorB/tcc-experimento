@@ -1,23 +1,24 @@
 /*
- * RS04 — Gerenciamento seguro de credenciais
+ * RS02 — Security Misconfiguration
  * OWASP ZAP Active Scan script (ECMAScript / Graal.js).
- *
- * Base: testRs04() em dast-rs01-rs07.test.ts.
+ * Baseado nos cenários RS02 de dast-rs01-rs07.test.ts.
  *
  * Cenários:
- * 1. Resposta de cadastro inválido não ecoa senha.
- * 2. Resposta de login inválido não ecoa senha.
- * 3. Resposta de cadastro válido não expõe credenciais.
- * 4. Resposta de login válido não expõe credenciais.
- * 5. Resposta de /users/me não expõe credenciais.
- * 6. Hashing de senha: NOT_EVALUATED (exige inspeção do código e SQLite).
+ * 1. /health não revela detalhes internos.
+ * 2. Cabeçalhos de segurança e CORS.
+ * 3. Caminhos/arquivos sensíveis não ficam acessíveis.
+ * 4. JWT HS256/HS384/HS512 não aceitam segredos comuns.
+ * 5. Segredos fixos no código: NOT_EVALUATED (responsabilidade do SAST).
  *
- * Somente FAIL gera alerta nativo do ZAP.
+ * Execute apenas contra ambiente de teste autorizado.
+ * PASS/NOT_EVALUATED/NOT_APPLICABLE ficam no log; FAIL gera alerta ZAP.
  */
 
 const URI = Java.type('org.apache.commons.httpclient.URI');
 const UUID = Java.type('java.util.UUID');
 const System = Java.type('java.lang.System');
+const Mac = Java.type('javax.crypto.Mac');
+const SecretKeySpec = Java.type('javax.crypto.spec.SecretKeySpec');
 const ScanRuleMetadata = Java.type(
     'org.zaproxy.addon.commonlib.scanrules.ScanRuleMetadata',
 );
@@ -26,14 +27,14 @@ var executed = false;
 
 function getMetadata() {
     return ScanRuleMetadata.fromYaml(`
-id: 110401
-name: RS04 - Gerenciamento seguro de credenciais
-description: Verifica se respostas HTTP expõem senhas, hashes de senha ou campos específicos de credenciais.
-solution: Nunca retorne senhas, hashes ou tokens internos de credenciais nas respostas. Armazene senhas com algoritmos de hashing apropriados, como Argon2id, bcrypt ou scrypt.
+id: 110201
+name: RS02 - Security misconfiguration
+description: Verifica vazamento de detalhes internos, cabeçalhos HTTP, CORS, exposição de caminhos sensíveis e aceitação de JWT assinado com segredos comuns.
+solution: Remova detalhes internos das respostas, configure cabeçalhos HTTP e CORS de forma segura, impeça acesso a arquivos internos e use segredos JWT fortes e externos ao código-fonte.
 reference: https://owasp.org/Top10/
-risk: HIGH
+risk: MEDIUM
 confidence: MEDIUM
-cweId: 522
+cweId: 16
 wascId: 0
     `);
 }
@@ -41,14 +42,15 @@ wascId: 0
 function scan(helper, msg, param, value) {
     if (executed) return;
 
-    // Inicia na primeira requisição da API, sem depender de uma rota específica.
+    // Inicia os cenários na primeira requisição do contexto da API.
+    // Os cenários individuais continuam verificando os endpoints funcionais previstos.
     executed = true;
 
     try {
-        runRs04(helper, msg, getBaseUrl(msg));
+        runRs02(helper, msg, getBaseUrl(msg));
     } catch (e) {
         print(
-            '[RS04] INFRA_ERROR (não classificado como vulnerabilidade): ' +
+            '[RS02] INFRA_ERROR (não classificado como vulnerabilidade): ' +
                 String(e),
         );
     }
@@ -57,9 +59,7 @@ function scan(helper, msg, param, value) {
 function getBaseUrl(msg) {
     var configured = String(System.getenv('DAST_BASE_URL') || '');
 
-    if (configured) {
-        return configured.replace(/\/+$/, '');
-    }
+    if (configured) return configured.replace(/\/+$/, '');
 
     var u = msg.getRequestHeader().getURI();
     var scheme = String(u.getScheme());
@@ -74,116 +74,100 @@ function getBaseUrl(msg) {
     );
 }
 
-function send(helper, original, base, method, route, options) {
-    options = options || {};
-
-    var message = original.cloneRequest();
-    var target = new URI(base + route, false);
-
-    message.getRequestHeader().setMethod(method);
-    message.getRequestHeader().setURI(target);
-
-    message
-        .getRequestHeader()
-        .setHeader(
-            'Host',
-            target.getHost() +
-                (target.getPort() > 0 ? ':' + target.getPort() : ''),
-        );
-
-    message.getRequestHeader().setHeader('Authorization', '');
-
-    if (options.token) {
-        message
-            .getRequestHeader()
-            .setHeader('Authorization', 'Bearer ' + options.token);
-    }
-
-    if (options.body !== undefined) {
-        var body = JSON.stringify(options.body);
-
-        message.setRequestBody(body);
-        message
-            .getRequestHeader()
-            .setHeader('Content-Type', 'application/json');
-        message
-            .getRequestHeader()
-            .setHeader('Content-Length', String(body.length));
-    } else {
-        message.setRequestBody('');
-        message.getRequestHeader().setHeader('Content-Length', '0');
-    }
-
-    helper.sendAndReceive(message, false, false);
-
-    return {
-        status: Number(message.getResponseHeader().getStatusCode()),
-        text: String(message.getResponseBody().toString()),
-        json: parseJson(String(message.getResponseBody().toString())),
-        message: message,
-    };
-}
-
 function parseJson(text) {
     try {
-        return text ? JSON.parse(text) : null;
+        return text ? JSON.parse(String(text)) : null;
     } catch (e) {
         return null;
     }
 }
 
-function isSuccess(status) {
-    return status >= 200 && status < 300;
-}
+function send(helper, original, base, method, route, options) {
+    options = options || {};
 
-function randomHex() {
-    return String(UUID.randomUUID()).replace(/-/g, '');
-}
+    var m = original.cloneRequest();
+    var target = new URI(base + route, false);
 
-function newAccount(label, runId) {
+    m.getRequestHeader().setMethod(method);
+    m.getRequestHeader().setURI(target);
+
+    m.getRequestHeader().setHeader(
+        'Host',
+        target.getHost() + (target.getPort() > 0 ? ':' + target.getPort() : ''),
+    );
+
+    m.getRequestHeader().setHeader('Authorization', '');
+
+    if (options.authorization) {
+        m.getRequestHeader().setHeader('Authorization', options.authorization);
+    }
+
+    if (options.origin) {
+        m.getRequestHeader().setHeader('Origin', options.origin);
+    }
+
+    if (options.headers) {
+        Object.keys(options.headers).forEach(function (k) {
+            m.getRequestHeader().setHeader(k, options.headers[k]);
+        });
+    }
+
+    if (options.body !== undefined) {
+        var body =
+            typeof options.body === 'string'
+                ? options.body
+                : JSON.stringify(options.body);
+
+        m.setRequestBody(body);
+
+        if (!options.rawBody) {
+            m.getRequestHeader().setHeader('Content-Type', 'application/json');
+        }
+
+        m.getRequestHeader().setHeader('Content-Length', String(body.length));
+    } else {
+        m.setRequestBody('');
+        m.getRequestHeader().setHeader('Content-Length', '0');
+    }
+
+    helper.sendAndReceive(m, false, false);
+
     return {
-        label: label,
-        email: 'dast-' + label + '-' + runId + '@example.invalid',
-        password: 'Dast-' + randomHex() + '!',
-        created: false,
-        registerResponse: null,
-        loginResponse: null,
-        accessToken: null,
-        refreshToken: null,
+        status: Number(m.getResponseHeader().getStatusCode()),
+        text: String(m.getResponseBody().toString()),
+        message: m,
     };
 }
 
-function tokenFrom(data, names) {
-    if (!data || typeof data !== 'object') return null;
+function header(response, name) {
+    try {
+        var value = response.message.getResponseHeader().getHeader(name);
 
-    for (var i = 0; i < names.length; i++) {
-        if (typeof data[names[i]] === 'string' && data[names[i]]) {
-            return data[names[i]];
-        }
+        return value === null || value === undefined ? '' : String(value);
+    } catch (e) {
+        return '';
     }
-
-    return tokenFrom(data.data, names) || tokenFrom(data.tokens, names);
 }
 
-function exposesCredentialKey(value) {
-    if (!value || typeof value !== 'object') {
-        return false;
-    }
+function internalDetails(text) {
+    var patterns = [
+        /\bat\s+\S+\s+\([^)]*:\d+:\d+\)/i,
+        /\bnode_modules\b/i,
+        /(?:\/app\/|\/home\/|\/var\/www\/|[A-Z]:\\[^ ]+)/i,
+        /\bprisma\b/i,
+        /\bSQLite\b/i,
+        /\bDATABASE_URL\b/i,
+        /\bJWT_(?:ACCESS|REFRESH)_SECRET\b/i,
+        /\bPrismaClient(?:KnownRequestError|UnknownRequestError|ValidationError)?\b/i,
+        /\bP20\d{2}\b/i,
+        /\bUnique constraint failed\b/i,
+        /\bSyntaxError\b/i,
+        /\bJsonWebTokenError\b|\bTokenExpiredError\b/i,
+        /\b\w+\.(?:ts|js|json):\d+:\d+\b/i,
+    ];
 
-    var keys = Object.keys(value);
-
-    for (var i = 0; i < keys.length; i++) {
-        var key = keys[i];
-
-        if (
-            /^(password|passwordHash|password_hash|credential|credentials|refreshTokenHash|refresh_token_hash)$/i.test(
-                key,
-            )
-        ) {
-            return true;
-        }
-
-        if (exposesCredentialKey(value[key])) {
+    for (var i = 0; i < patterns.length; i++) {
+        if (patterns[i].test(String(text || ''))) {
             return true;
         }
     }
@@ -191,56 +175,51 @@ function exposesCredentialKey(value) {
     return false;
 }
 
-function exposesCredentials(response, passwords) {
-    var text = response.text || '';
-
-    // Hashes conhecidos: bcrypt, Argon2 e scrypt.
-    var containsHash = /\$2[abxy]\$\d{2}\$|\$argon2(id|i|d)\$|\$scrypt\$/i.test(
-        text,
-    );
-
-    var containsPassword = passwords.some(function (password) {
-        return password && text.indexOf(password) >= 0;
-    });
-
-    return (
-        containsHash || containsPassword || exposesCredentialKey(response.json)
-    );
-}
-
-function createAlert(helper, response, test, evidence) {
+function finding(
+    helper,
+    response,
+    test,
+    risk,
+    cwe,
+    expected,
+    evidence,
+    solution,
+) {
     helper
         .newAlert()
-        .setRisk(3)
+        .setRisk(risk)
         .setConfidence(2)
-        .setName('RS04 - ' + test)
+        .setName('RS02 - ' + test)
         .setDescription(
-            'A resposta HTTP expôs uma senha, hash ou campo específico de credenciais.',
+            'Falha no cenário RS02 definido em dast-rs01-rs07.test.ts.',
         )
         .setUri(String(response.message.getRequestHeader().getURI().toString()))
         .setParam(test)
         .setAttack('HTTP ' + response.status)
-        .setEvidence(evidence)
+        .setEvidence(String(evidence))
         .setOtherInfo(
-            'Cenário RS04; resposta HTTP ' +
-                response.status +
-                '. A evidência deve ser revisada para confirmar a exposição.',
+            'Esperado: ' + expected + '. Evidência: ' + String(evidence),
         )
-        .setSolution(
-            'Remova senhas, hashes e campos internos de credenciais das respostas. ' +
-                'Armazene senhas usando hashing apropriado e nunca as registre ou devolva ao cliente.',
-        )
+        .setSolution(solution)
         .setReference('https://owasp.org/Top10/')
-        .setCweId(522)
+        .setCweId(cwe)
         .setMessage(response.message)
         .raise();
 }
 
-function check(helper, response, test, failed, evidence) {
-    var status = failed ? 'FAIL' : 'PASS';
-
+function check(
+    helper,
+    response,
+    test,
+    status,
+    expected,
+    evidence,
+    risk,
+    cwe,
+    solution,
+) {
     print(
-        '[RS04] ' +
+        '[RS02] ' +
             test +
             ' => ' +
             status +
@@ -250,192 +229,277 @@ function check(helper, response, test, failed, evidence) {
             evidence,
     );
 
-    if (failed) {
-        createAlert(helper, response, test, evidence);
+    if (status === 'FAIL') {
+        finding(
+            helper,
+            response,
+            test,
+            risk || 2,
+            cwe || 16,
+            expected,
+            evidence,
+            solution ||
+                'Revise a configuração da aplicação e remova a exposição identificada.',
+        );
     }
 }
 
-function runRs04(helper, trigger, base) {
-    var runId =
-        String(new java.util.Date().getTime()) +
-        '-' +
-        randomHex().substring(0, 8);
+function b64url(bytes) {
+    var Base64 = Java.type('java.util.Base64');
 
-    var account = newAccount('rs04', runId);
+    return String(
+        Base64.getUrlEncoder().withoutPadding().encodeToString(bytes),
+    );
+}
 
-    /*
-     * Preparação:
-     * cria a conta para permitir comparar as respostas de cadastro
-     * e login válidos.
-     */
-    var register = send(helper, trigger, base, 'POST', '/auth/register', {
-        body: {
-            name: 'DAST Test User',
-            email: account.email,
-            password: account.password,
-        },
-    });
+function hmacJwt(secret, algorithm, payload) {
+    var algMap = {
+        HS256: 'HmacSHA256',
+        HS384: 'HmacSHA384',
+        HS512: 'HmacSHA512',
+    };
 
-    account.registerResponse = register;
-    account.created = [200, 201, 202].indexOf(register.status) >= 0;
+    var headerPart = b64url(
+        new java.lang.String(
+            JSON.stringify({ alg: algorithm, typ: 'JWT' }),
+        ).getBytes('UTF-8'),
+    );
 
-    print('[RS04][PREP] Cadastro da conta temporária: HTTP ' + register.status);
+    var payloadPart = b64url(
+        new java.lang.String(JSON.stringify(payload)).getBytes('UTF-8'),
+    );
 
-    if (account.created) {
-        var login = send(helper, trigger, base, 'POST', '/auth/login', {
-            body: {
-                email: account.email,
-                password: account.password,
-            },
-        });
+    var signingInput = headerPart + '.' + payloadPart;
+    var mac = Mac.getInstance(algMap[algorithm]);
 
-        account.loginResponse = login;
+    mac.init(
+        new SecretKeySpec(
+            new java.lang.String(secret).getBytes('UTF-8'),
+            algMap[algorithm],
+        ),
+    );
 
-        if (isSuccess(login.status)) {
-            account.accessToken = tokenFrom(login.json, [
-                'accessToken',
-                'access_token',
-                'token',
-            ]);
+    var signature = mac.doFinal(
+        new java.lang.String(signingInput).getBytes('UTF-8'),
+    );
 
-            account.refreshToken = tokenFrom(login.json, [
-                'refreshToken',
-                'refresh_token',
-            ]);
+    return signingInput + '.' + b64url(signature);
+}
+
+function tokenPayload() {
+    var now = Math.floor(new Date().getTime() / 1000);
+
+    return {
+        sub: 'dast-rs02-user',
+        id: 'dast-rs02-user',
+        email: 'dast-rs02@example.invalid',
+        iat: now,
+        exp: now + 300,
+    };
+}
+
+function runRs02(helper, trigger, base) {
+    var solution =
+        'Não exponha detalhes de implementação em respostas HTTP; registre detalhes apenas nos logs internos.';
+
+    // 1. /health não deve revelar detalhes internos.
+    var health = send(helper, trigger, base, 'GET', '/health');
+
+    if (health.status === 404) {
+        print(
+            '[RS02] /health sem endpoint => NOT_EVALUATED (endpoint ausente).',
+        );
+    } else {
+        var leaks = internalDetails(health.text);
+
+        check(
+            helper,
+            health,
+            '/health não revela detalhes internos',
+            leaks ? 'FAIL' : 'PASS',
+            'resposta sem stack trace, caminhos internos, detalhes de Prisma/SQLite ou segredos',
+            leaks
+                ? 'A resposta contém padrão compatível com detalhe interno.'
+                : 'Nenhum padrão interno detectado.',
+            2,
+            209,
+            solution,
+        );
+    }
+
+    // 2. Cabeçalhos de segurança HTTP.
+    var paths = [
+        '/health',
+        '/users/me',
+        '/dast-rs02-route-' + String(UUID.randomUUID()),
+    ];
+
+    paths.forEach(function (route) {
+        var r = send(helper, trigger, base, 'GET', route);
+        var issues = [];
+
+        var powered = header(r, 'X-Powered-By');
+        var server = header(r, 'Server');
+        var nosniff = header(r, 'X-Content-Type-Options');
+
+        if (powered) {
+            issues.push('X-Powered-By=' + powered);
         }
 
-        print('[RS04][PREP] Login da conta temporária: HTTP ' + login.status);
-    }
+        if (
+            /\b(?:Apache|nginx|Express|PHP|Node\.js)\/?\d+(?:\.\d+)*/i.test(
+                server,
+            )
+        ) {
+            issues.push('Server=' + server);
+        }
 
-    /*
-     * 1. Resposta de cadastro inválido não ecoa senha.
-     */
-    var invalidRegisterPassword = 'Secret-' + randomHex();
+        if (nosniff.toLowerCase() !== 'nosniff') {
+            issues.push(
+                'X-Content-Type-Options ausente ou diferente de nosniff',
+            );
+        }
 
-    var invalidRegister = send(
-        helper,
-        trigger,
-        base,
-        'POST',
-        '/auth/register',
-        {
-            body: {
-                name: { invalid: true },
-                email: 'email-invalido',
-                password: invalidRegisterPassword,
-            },
-        },
-    );
+        check(
+            helper,
+            r,
+            'Cabeçalhos de segurança HTTP em ' + route,
+            issues.length ? 'FAIL' : 'PASS',
+            'sem X-Powered-By, sem versão explícita no Server e X-Content-Type-Options: nosniff',
+            issues.length
+                ? issues.join('; ')
+                : 'Cabeçalhos avaliados conforme critérios RS02.',
+            1,
+            693,
+            'Remova X-Powered-By e versões de servidor; configure X-Content-Type-Options: nosniff.',
+        );
+    });
 
-    var registerEcho =
-        invalidRegister.text.indexOf(invalidRegisterPassword) >= 0;
-
-    check(
-        helper,
-        invalidRegister,
-        'Resposta de cadastro inválido não ecoa senha',
-        registerEcho,
-        registerEcho
-            ? 'Senha sentinela encontrada na resposta.'
-            : 'Senha sentinela não encontrada na resposta.',
-    );
-
-    /*
-     * 2. Resposta de login inválido não ecoa senha.
-     */
-    var invalidLoginPassword = 'Secret-' + randomHex();
-
-    var invalidLogin = send(helper, trigger, base, 'POST', '/auth/login', {
-        body: {
-            email: account.created
-                ? account.email
-                : 'ausente-' + runId + '@example.invalid',
-            password: invalidLoginPassword,
+    // 3. CORS: falha apenas com wildcard e credenciais juntos.
+    var cors = send(helper, trigger, base, 'OPTIONS', '/auth/login', {
+        origin: 'https://dast-origin.example.invalid',
+        headers: {
+            'Access-Control-Request-Method': 'POST',
+            'Access-Control-Request-Headers': 'content-type,authorization',
         },
     });
 
-    var loginEcho = invalidLogin.text.indexOf(invalidLoginPassword) >= 0;
+    var allowOrigin = header(cors, 'Access-Control-Allow-Origin');
+    var allowCredentials = header(cors, 'Access-Control-Allow-Credentials');
+
+    var unsafeCors =
+        allowOrigin.trim() === '*' && allowCredentials.toLowerCase() === 'true';
 
     check(
         helper,
-        invalidLogin,
-        'Resposta de login inválido não ecoa senha',
-        loginEcho,
-        loginEcho
-            ? 'Senha sentinela encontrada na resposta.'
-            : 'Senha sentinela não encontrada na resposta.',
+        cors,
+        'CORS não combina origem wildcard com credenciais',
+        unsafeCors ? 'FAIL' : 'PASS',
+        'não usar Access-Control-Allow-Origin: * junto com Access-Control-Allow-Credentials: true',
+        'Access-Control-Allow-Origin=' +
+            (allowOrigin || '(ausente)') +
+            '; Access-Control-Allow-Credentials=' +
+            (allowCredentials || '(ausente)'),
+        2,
+        942,
+        'Restrinja CORS a origens confiáveis. Não combine origem wildcard com credenciais.',
     );
 
-    /*
-     * 3. Resposta de cadastro válido não expõe credenciais.
-     */
-    var registerExposes = exposesCredentials(register, [account.password]);
+    // 4. Caminhos sensíveis não devem retornar HTTP 2xx.
+    [
+        '/.env',
+        '/.git/config',
+        '/package.json',
+        '/prisma/schema.prisma',
+        '/prisma/dev.db',
+        '/dev.db',
+        '/debug',
+        '/console',
+    ].forEach(function (route) {
+        var r = send(helper, trigger, base, 'GET', route);
 
-    check(
-        helper,
-        register,
-        'Resposta de cadastro válido não expõe credenciais',
-        registerExposes,
-        registerExposes
-            ? 'Campos específicos de credenciais, hash ou senha detectados.'
-            : 'Nenhum campo específico de credenciais, hash ou senha detectado.',
-    );
-
-    /*
-     * 4. Resposta de login válido não expõe credenciais.
-     */
-    if (!account.loginResponse) {
-        print(
-            '[RS04] Resposta de login válido não expõe credenciais ' +
-                '=> NOT_EVALUATED: conta não foi criada.',
-        );
-    } else {
-        var loginExposes = exposesCredentials(account.loginResponse, [
-            account.password,
-        ]);
+        var status = r.status >= 200 && r.status < 300 ? 'FAIL' : 'PASS';
 
         check(
             helper,
-            account.loginResponse,
-            'Resposta de login válido não expõe credenciais',
-            loginExposes,
-            loginExposes
-                ? 'Campos específicos de credenciais, hash ou senha detectados.'
-                : 'Nenhum campo específico de credenciais, hash ou senha detectado.',
+            r,
+            'Caminho sensível não está exposto: ' + route,
+            status,
+            'status HTTP fora de 2xx',
+            'HTTP ' +
+                r.status +
+                (r.status >= 200 && r.status < 300
+                    ? '; caminho retornou sucesso.'
+                    : '; caminho não retornou sucesso.'),
+            3,
+            538,
+            'Bloqueie o acesso público a arquivos de configuração, repositórios, bancos e rotas de depuração.',
         );
+    });
+
+    // 5. JWT assinado com segredos comuns.
+    var commonSecrets = [
+        'secret',
+        'changeme',
+        'change-me',
+        'jwt_secret',
+        'jwt-secret',
+        'your-secret-key',
+        'supersecret',
+        'dev-secret',
+        'default',
+        'password',
+        '123456',
+    ];
+
+    var algorithms = ['HS256', 'HS384', 'HS512'];
+    var acceptedWeakSecret = null;
+    var jwtProbe = null;
+    var jwtPayload = tokenPayload();
+
+    for (var a = 0; a < algorithms.length && !acceptedWeakSecret; a++) {
+        for (var s = 0; s < commonSecrets.length && !acceptedWeakSecret; s++) {
+            var token = hmacJwt(commonSecrets[s], algorithms[a], jwtPayload);
+
+            var response = send(helper, trigger, base, 'GET', '/users/me', {
+                authorization: 'Bearer ' + token,
+            });
+
+            jwtProbe = response;
+
+            if (response.status >= 200 && response.status < 300) {
+                acceptedWeakSecret = {
+                    secret: commonSecrets[s],
+                    algorithm: algorithms[a],
+                };
+            }
+        }
     }
 
-    /*
-     * 5. Resposta de /users/me não expõe credenciais.
-     */
-    if (!account.accessToken) {
-        print(
-            '[RS04] Resposta de /users/me não expõe credenciais ' +
-                '=> NOT_EVALUATED: access token não disponível.',
-        );
-    } else {
-        var profile = send(helper, trigger, base, 'GET', '/users/me', {
-            token: account.accessToken,
-        });
-
-        var profileExposes = exposesCredentials(profile, [account.password]);
-
+    if (acceptedWeakSecret) {
         check(
             helper,
-            profile,
-            'Resposta de /users/me não expõe credenciais',
-            profileExposes,
-            profileExposes
-                ? 'Campos específicos de credenciais, hash ou senha detectados.'
-                : 'Nenhum campo específico de credenciais, hash ou senha detectado.',
+            jwtProbe,
+            'JWT aceita segredo de assinatura comum',
+            'FAIL',
+            'JWT assinado com segredo forte e não previsível',
+            'Token ' +
+                acceptedWeakSecret.algorithm +
+                ' assinado com segredo comum foi aceito; segredo=' +
+                acceptedWeakSecret.secret,
+            3,
+            347,
+            'Use segredo JWT forte, aleatório e gerenciado fora do código-fonte; valide também issuer, audience e claims.',
+        );
+    } else {
+        print(
+            '[RS02] JWT com segredos comuns => PASS para a lista testada; ' +
+                'isso não prova que o segredo configurado seja forte.',
         );
     }
 
-    /*
-     * 6. Hashing apropriado da senha não pode ser confirmado via HTTP.
-     */
+    // 6. O teste de segredos fixos no código pertence ao SAST.
     print(
-        '[RS04] Senha armazenada com hashing apropriado ' +
-            '=> NOT_EVALUATED: exige inspeção do código e do banco SQLite.',
+        '[RS02] Segredos fixos no código-fonte => NOT_EVALUATED: cenário destinado ao SAST.',
     );
 }
