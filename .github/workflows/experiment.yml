@@ -495,6 +495,7 @@ jobs:
               shell: bash
               run: |
                   set -uo pipefail
+
                   EVIDENCE_DIR="$GITHUB_WORKSPACE/evidence/dast"
                   mkdir -p "$EVIDENCE_DIR"
                   export EVIDENCE_DIR
@@ -513,6 +514,10 @@ jobs:
 
                   status=${PIPESTATUS[0]}
                   set -e
+
+                  # Corrige permissões dos arquivos criados pelo container do ZAP.
+                  sudo chown -R "$(id -u):$(id -g)" "$EVIDENCE_DIR"
+                  sudo chmod -R u+rwX "$EVIDENCE_DIR"
 
                   echo "zap_exit_code=$status" \
                     >> "$EVIDENCE_DIR/metadata.txt"
