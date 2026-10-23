@@ -1,5 +1,5 @@
 /*
- * Testes DAST complementares específicos da API de autenticação.
+ * Verificações comportamentais da análise DAST do OWASP ZAP para a API de autenticação.
  *
  * FINALIDADE
  * Executa somente verificações comportamentais que a varredura padrão do
@@ -49,8 +49,8 @@ var suiteExecuted = false;
 function getMetadata() {
     return ScanRuleMetadata.fromYaml(`
 id: 110900
-name: Testes comportamentais extras - API de autenticação
-description: Verifica falhas lógicas de autorização, confusão de tokens, invalidação de refresh token e exposição de credenciais que não são garantidas pela varredura padrão.
+name: Verificações comportamentais - API de autenticação
+description: Verifica controle de acesso, uso indevido de tokens, invalidação de refresh tokens e exposição de credenciais. Os achados são registrados como alertas OWASP ZAP.
 solution: Aplique autorização no servidor, separe access e refresh tokens, invalide sessões quando necessário e nunca exponha senhas, hashes ou tokens internos em respostas.
 reference: https://www.zaproxy.org/docs/desktop/start/features/ascan/
 risk: MEDIUM
@@ -67,7 +67,7 @@ function scan(helper, msg, param, value) {
     try {
         runSuite(helper, msg, getBaseUrl(msg));
     } catch (e) {
-        print('[DAST-EXTRA] INFRA_ERROR: ' + String(e));
+        print('[DAST] INFRA_ERROR: ' + String(e));
     }
 }
 
@@ -141,16 +141,16 @@ function isRejected(status) {
 }
 
 function finding(helper, response, testName, detail, risk, evidence) {
-    print('[DAST-EXTRA] ' + testName + ' => FAIL; ' + detail);
+    print('[DAST] ' + testName + ' => FAIL; ' + detail);
     helper.newAlert()
-        .setRisk(risk || 2)
+        .setRisk(risk === undefined || risk === null ? 2 : risk)
         .setConfidence(2)
-        .setName('DAST extra - ' + testName)
+        .setName(testName)
         .setDescription(detail)
         .setUri(String(response.message.getRequestHeader().getURI().toString()))
         .setParam(testName)
         .setEvidence(evidence || ('HTTP ' + response.status))
-        .setOtherInfo('Teste complementar comportamental. Revise a evidência e confirme o impacto antes de classificar como vulnerabilidade confirmada.')
+        .setOtherInfo('Alerta identificado durante a análise de segurança da API. Revise a evidência e confirme o impacto antes de classificar como vulnerabilidade confirmada.')
         .setSolution('Valide autenticação e autorização no servidor; diferencie access tokens de refresh tokens; invalide refresh tokens após logout/rotação; remova credenciais e hashes das respostas.')
         .setReference('https://www.zaproxy.org/docs/desktop/start/features/ascan/')
         .setCweId(862)
@@ -159,17 +159,18 @@ function finding(helper, response, testName, detail, risk, evidence) {
 }
 
 function result(name, status, passed, detail) {
-    print('[DAST-EXTRA] ' + name + ' => ' +
+    print('[DAST] ' + name + ' => ' +
         (passed ? 'PASS' : 'NOT_EVALUATED') + '; HTTP ' + status + '; ' + detail);
 }
 
-function checkRejected(helper, response, name, detail) {
+function checkRejected(helper, response, name, detail, risk) {
     if (isRejected(response.status)) {
         result(name, response.status, true, detail);
     } else if (is2xx(response.status)) {
         finding(helper, response, name,
             detail + ' A API aceitou a requisição que deveria ser recusada.',
-            2, 'HTTP ' + response.status);
+            risk === undefined || risk === null ? 2 : risk,
+            'HTTP ' + response.status);
     } else {
         result(name, response.status, false,
             detail + ' Resposta inconclusiva; não classificada automaticamente como vulnerabilidade.');
@@ -188,7 +189,7 @@ function registerAccount(helper, original, base, label) {
         body: { name: 'DAST Extra User ' + label, email: a.email, password: a.password }
     });
     a.created = [200, 201, 202].indexOf(reg.status) >= 0;
-    print('[DAST-EXTRA][PREP] cadastro ' + label + ': HTTP ' + reg.status);
+    print('[DAST][PREP] cadastro ' + label + ': HTTP ' + reg.status);
     if (!a.created) return a;
 
     var login = send(helper, original, base, 'POST', '/auth/login', {
@@ -198,7 +199,7 @@ function registerAccount(helper, original, base, label) {
         a.access = tokenFrom(login.json, ['accessToken', 'access_token', 'token']);
         a.refresh = tokenFrom(login.json, ['refreshToken', 'refresh_token']);
     }
-    print('[DAST-EXTRA][PREP] login ' + label + ': HTTP ' + login.status +
+    print('[DAST][PREP] login ' + label + ': HTTP ' + login.status +
         '; access=' + Boolean(a.access) + '; refresh=' + Boolean(a.refresh));
     return a;
 }
@@ -243,22 +244,22 @@ function checkNoCredentialLeak(helper, response, name, password) {
 }
 
 function runSuite(helper, original, base) {
-    print('[DAST-EXTRA] Início da suíte complementar em ' + base);
+    print('[DAST] Início da suíte complementar em ' + base);
 
     /*
-     * EXTRA 1 — Acesso sem autenticação.
+     * Verificação 1 — Acesso sem autenticação.
      * O scanner padrão não garante detectar falhas lógicas de controle de
      * acesso; esta checagem confirma o comportamento esperado da rota conhecida.
      */
     var anonymous = send(helper, original, base, 'GET', '/users/me', {});
     checkRejected(helper, anonymous, 'GET /users/me sem autenticação',
-        'O perfil deve exigir autenticação.');
+        'O perfil deve exigir autenticação.', 3);
 
     var a = registerAccount(helper, original, base, 'a');
     var b = registerAccount(helper, original, base, 'b');
 
     /*
-     * EXTRA 2 — Isolamento entre identidades.
+     * Verificação 2 — Isolamento entre identidades.
      * /users/me é uma rota própria, portanto não substitui testes IDOR de
      * recursos de negócio. Para testar IDOR, o projeto precisa declarar um
      * endpoint/identificador de recurso pertencente a outro usuário.
@@ -282,20 +283,20 @@ function runSuite(helper, original, base) {
                 'Não foi possível confirmar o formato de identidade nas respostas; revisão manual necessária.');
         }
     } else {
-        print('[DAST-EXTRA] Isolamento dos perfis A/B => NOT_EVALUATED; duas contas/tokens não disponíveis.');
+        print('[DAST] Isolamento dos perfis A/B => NOT_EVALUATED; duas contas/tokens não disponíveis.');
     }
 
     /*
-     * EXTRA 3 — Confusão entre access token e refresh token.
+     * Verificação 3 — Confusão entre access token e refresh token.
      * O ZAP testa tokens e autenticação em vários casos, mas a separação entre
      * finalidades de tokens é uma regra de negócio específica da API.
      */
     if (a.refresh) {
         var refreshAsAccess = send(helper, original, base, 'GET', '/users/me', { token: a.refresh });
         checkRejected(helper, refreshAsAccess, 'Refresh token usado como access token',
-            'Um refresh token não deve autorizar acesso a recursos protegidos.');
+            'Um refresh token não deve autorizar acesso a recursos protegidos.', 3);
     } else {
-        print('[DAST-EXTRA] Refresh token usado como access token => NOT_EVALUATED; refresh token ausente.');
+        print('[DAST] Refresh token usado como access token => NOT_EVALUATED; refresh token ausente.');
     }
 
     if (a.access) {
@@ -303,13 +304,13 @@ function runSuite(helper, original, base) {
             body: { refreshToken: a.access }
         });
         checkRejected(helper, accessAsRefresh, 'Access token usado como refresh token',
-            'Um access token não deve ser aceito como credencial de renovação.');
+            'Um access token não deve ser aceito como credencial de renovação.', 3);
     } else {
-        print('[DAST-EXTRA] Access token usado como refresh token => NOT_EVALUATED; access token ausente.');
+        print('[DAST] Access token usado como refresh token => NOT_EVALUATED; access token ausente.');
     }
 
     /*
-     * EXTRA 4 — Rotação e logout de refresh token.
+     * Verificação 4 — Rotação e logout de refresh token.
      * A reutilização após rotação e o uso após logout verificam o ciclo de vida
      * da sessão; não são garantidos por uma varredura genérica de payloads.
      */
@@ -329,7 +330,7 @@ function runSuite(helper, original, base) {
                     body: { refreshToken: refresh }
                 });
                 checkRejected(helper, reused, 'Reutilização de refresh token após rotação',
-                    'Se a API implementa rotação, o token anterior deve ser invalidado.');
+                    'Se a API implementa rotação, o token anterior deve ser invalidado.', 2);
             } else {
                 result('Reutilização de refresh token após rotação', rotated.status, false,
                     'A renovação inicial não funcionou; teste de rotação não avaliado.');
@@ -352,21 +353,21 @@ function runSuite(helper, original, base) {
                         body: { refreshToken: logoutRefresh }
                     });
                     checkRejected(helper, afterLogout, 'Refresh token após logout',
-                        'Após logout bem-sucedido, o refresh token revogado não deve renovar a sessão.');
+                        'Após logout bem-sucedido, o refresh token revogado não deve renovar a sessão.', 2);
                 } else {
                     result('Refresh token após logout', logout.status, false,
                         'Logout não confirmou sucesso; invalidação não avaliada. Verifique o contrato da API.');
                 }
             } else {
-                print('[DAST-EXTRA] Refresh token após logout => NOT_EVALUATED; tokens da sessão de logout ausentes.');
+                print('[DAST] Refresh token após logout => NOT_EVALUATED; tokens da sessão de logout ausentes.');
             }
         } else {
-            print('[DAST-EXTRA] Rotação/logout de refresh token => NOT_EVALUATED; refresh token ausente.');
+            print('[DAST] Rotação/logout de refresh token => NOT_EVALUATED; refresh token ausente.');
         }
     }
 
     /*
-     * EXTRA 5 — Exposição de credenciais nas respostas.
+     * Verificação 5 — Exposição de credenciais nas respostas.
      * O ZAP tem regras genéricas de exposição de informação, mas não conhece
      * necessariamente o contrato de resposta e os campos de senha/hash desta
      * API. Tokens de sessão são permitidos no login quando fazem parte do contrato.
@@ -388,5 +389,5 @@ function runSuite(helper, original, base) {
         checkNoCredentialLeak(helper, profile, 'Perfil não expõe senha/hash', a.password);
     }
 
-    print('[DAST-EXTRA] Fim da suíte complementar.');
+    print('[DAST] Fim da suíte complementar.');
 }

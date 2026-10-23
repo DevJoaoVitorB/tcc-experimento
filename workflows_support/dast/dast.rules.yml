@@ -1,8 +1,9 @@
-# Plano DAST: análise padrão do ZAP + testes comportamentais que exigem
-# conhecimento do contrato desta API (autorização, ciclo de tokens e credenciais).
+# Plano DAST do OWASP ZAP para a API de autenticação.
 #
-# A análise padrão continua sendo executada pelo OpenAPI + Active Scan + Passive Scan.
-# O script complementar NÃO substitui as regras padrão do ZAP.
+# O relatório reúne os alertas do Active Scan/Passive Scan e os alertas levantados
+# pelo script de análise comportamental. O script registra achados por meio da API
+# de alertas do ZAP; por isso, eles usam a mesma escala de risco e aparecem no
+# relatório JSON/HTML padrão, sem uma categoria de relatório separada.
 #
 # Documentação oficial:
 # Automation Framework: https://www.zaproxy.org/docs/desktop/addons/automation-framework/
@@ -76,7 +77,7 @@ jobs:
           reportDir: /zap/out
           reportFile: zap-report.json
           reportTitle: 'DAST - Authentication API'
-          reportDescription: 'Alertas padrão do ZAP e testes comportamentais complementares.'
+          reportDescription: 'Alertas consolidados da análise DAST do OWASP ZAP, incluindo as verificações comportamentais da API.'
 
     - type: report
       parameters:
@@ -84,4 +85,4 @@ jobs:
           reportDir: /zap/out
           reportFile: zap-report.html
           reportTitle: 'DAST - Authentication API'
-          reportDescription: 'Alertas padrão do ZAP e testes comportamentais complementares.'
+          reportDescription: 'Alertas consolidados da análise DAST do OWASP ZAP, incluindo as verificações comportamentais da API.'

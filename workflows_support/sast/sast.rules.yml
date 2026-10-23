@@ -336,32 +336,26 @@ rules:
                 - pattern: |
                       $RES.cookie($NAME, $VALUE, $OPTIONS)
           - pattern-not: |
-                |
                 $RES.cookie($NAME, $VALUE, {
                   ..., httpOnly: true, ..., secure: true, ..., sameSite: "strict", ...
                 })
           - pattern-not: |
-                |
                 $RES.cookie($NAME, $VALUE, {
                   ..., httpOnly: true, ..., secure: true, ..., sameSite: "lax", ...
                 })
           - pattern-not: |
-                |
                 $RES.cookie($NAME, $VALUE, {
                   ..., httpOnly: true, ..., secure: true, ..., sameSite: "none", ...
                 })
           - pattern-not: |
-                |
                 $RES.cookie($NAME, $VALUE, {
                   ..., httpOnly: true, ..., secure: true, ..., sameSite: 'strict', ...
                 })
           - pattern-not: |
-                |
                 $RES.cookie($NAME, $VALUE, {
                   ..., httpOnly: true, ..., secure: true, ..., sameSite: 'lax', ...
                 })
           - pattern-not: |
-                |
                 $RES.cookie($NAME, $VALUE, {
                   ..., httpOnly: true, ..., secure: true, ..., sameSite: 'none', ...
                 })
@@ -419,13 +413,11 @@ rules:
       languages: [javascript, typescript]
       pattern-either:
           - pattern: |
-                |
                 try {
                   ...
                 } catch ($ERR) {
                 }
           - pattern: |
-                |
                 try {
                   ...
                 } catch ($ERR) {
