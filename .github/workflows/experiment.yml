@@ -170,7 +170,14 @@ jobs:
                     semgrep scan \
                       --config p/security-audit \
                       --config p/secrets \
+                      --config p/owasp-top-ten \
+                      --config p/javascript \
+                      --config p/typescript \
+                      --config p/nodejs \
+                      --config p/jwt \
                       --config "/src/$SAST_PLAN" \
+                      --exclude .github/ \
+                      --exclude workflows_support/ \
                       --json \
                       --output /reports/semgrep-report.json \
                       /src \
@@ -464,15 +471,23 @@ jobs:
                     exit 1
                   fi
 
-                  if [ ! -s "$GITHUB_WORKSPACE/openapi.json" ] &&
-                    ! curl -fsS --max-time 5 \
-                      "$DAST_BASE_URL/openapi.json" \
-                      -o "$GITHUB_WORKSPACE/openapi.json"; then
-                    echo "::error::OpenAPI não encontrado no arquivo local nem em /openapi.json."
+                  if ! curl -fsS --max-time 5 \
+                    "$DAST_BASE_URL/openapi.json" \
+                    -o "$EVIDENCE_DIR/openapi.json"; then
+                    echo "::error::Não foi possível obter /openapi.json."
                     exit 1
                   fi
 
-                  echo "Plano DAST e script complementar encontrados." \
+                  if ! jq -e '
+                    type == "object" and
+                    (.paths | type == "object") and
+                    (.paths | length > 0)
+                  ' "$EVIDENCE_DIR/openapi.json" >/dev/null; then
+                    echo "::error::O documento OpenAPI está inválido ou não contém rotas."
+                    exit 1
+                  fi
+
+                  echo "Plano DAST, script e OpenAPI validados." \
                     | tee "$EVIDENCE_DIR/config-validation.txt"
 
             - name: Run OWASP ZAP
@@ -500,46 +515,139 @@ jobs:
                   echo "zap_exit_code=$status" \
                     >> "$EVIDENCE_DIR/metadata.txt"
 
-                  if [ "$status" -ne 0 ]; then
-                    echo "Falha na execução do OWASP ZAP (código $status)." \
-                      | tee "$EVIDENCE_DIR/error.txt"
-                    exit "$status"
-                  fi
+                  # Cria um resumo estruturado a partir dos resultados do script.
+                  # FAIL é um resultado de teste, não necessariamente falha de execução.
+                  node <<'NODE'
+                  const fs = require('fs');
+                  const path = require('path');
+
+                  const dir = path.join(process.env.GITHUB_WORKSPACE,
+                                        process.env.EVIDENCE_DIR);
+                  const logPath = path.join(dir, 'zap.log');
+                  const outputPath = path.join(dir, 'dast-tests.json');
+
+                  const log = fs.existsSync(logPath)
+                    ? fs.readFileSync(logPath, 'utf8')
+                    : '';
+
+                  const tests = [];
+                  const counts = {
+                    PASS: 0,
+                    FAIL: 0,
+                    NOT_EVALUATED: 0,
+                    ERROR: 0
+                  };
+
+                  const pattern =
+                    /^\[DAST\]\s+(.+?)\s+=>\s+(PASS|FAIL|NOT_EVALUATED|ERROR)\b([^\r\n]*)/gm;
+
+                  for (const match of log.matchAll(pattern)) {
+                    const name = match[1].trim();
+                    const status = match[2];
+                    const detail = match[3].replace(/^;\s*/, '').trim();
+
+                    tests.push({ name, status, detail });
+                    counts[status]++;
+                  }
+
+                  const infraErrors = [
+                    ...log.matchAll(/^\[DAST\]\s+INFRA_ERROR:\s*(.*)$/gm)
+                  ];
+
+                  for (const match of infraErrors) {
+                    tests.push({
+                      name: 'Execução da suíte complementar',
+                      status: 'ERROR',
+                      detail: match[1].trim()
+                    });
+                    counts.ERROR++;
+                  }
+
+                  const completed =
+                    tests.length > 0 &&
+                    counts.ERROR === 0 &&
+                    counts.NOT_EVALUATED === 0 &&
+                    infraErrors.length === 0;
+
+                  const report = {
+                    schemaVersion: 1,
+                    completed,
+                    total: tests.length,
+                    counts,
+                    tests
+                  };
+
+                  fs.writeFileSync(
+                    outputPath,
+                    JSON.stringify(report, null, 2) + '\n'
+                  );
+
+                  console.log(
+                    `Testes complementares: total=${report.total}, ` +
+                    `PASS=${counts.PASS}, FAIL=${counts.FAIL}, ` +
+                    `NOT_EVALUATED=${counts.NOT_EVALUATED}, ERROR=${counts.ERROR}`
+                  );
+                  NODE
+
+                  echo "dast_tests_total=$(jq -r '.total' "$EVIDENCE_DIR/dast-tests.json")" \
+                    >> "$EVIDENCE_DIR/metadata.txt"
+                  echo "dast_tests_pass=$(jq -r '.counts.PASS' "$EVIDENCE_DIR/dast-tests.json")" \
+                    >> "$EVIDENCE_DIR/metadata.txt"
+                  echo "dast_tests_fail=$(jq -r '.counts.FAIL' "$EVIDENCE_DIR/dast-tests.json")" \
+                    >> "$EVIDENCE_DIR/metadata.txt"
+                  echo "dast_tests_not_evaluated=$(jq -r '.counts.NOT_EVALUATED' "$EVIDENCE_DIR/dast-tests.json")" \
+                    >> "$EVIDENCE_DIR/metadata.txt"
+                  echo "dast_tests_error=$(jq -r '.counts.ERROR' "$EVIDENCE_DIR/dast-tests.json")" \
+                    >> "$EVIDENCE_DIR/metadata.txt"
+
+                  # Validar relatórios mesmo se o ZAP tiver retornado código diferente de zero.
+                  validation_error=0
 
                   for report in zap-report.json zap-report.html; do
                     if [ ! -s "$EVIDENCE_DIR/$report" ]; then
                       echo "Relatório ausente ou vazio: $report" \
                         | tee -a "$EVIDENCE_DIR/error.txt"
-                      exit 1
+                      validation_error=1
                     fi
                   done
 
-                  if ! jq -e '
-                    (.site | type == "array") and
-                    (.site | length > 0) and
-                    all(.site[]; (.alerts | type == "array"))
-                  ' "$EVIDENCE_DIR/zap-report.json" >/dev/null; then
-                    echo "O relatório JSON do ZAP está inválido ou não contém a estrutura de alertas esperada." \
+                  if [ -s "$EVIDENCE_DIR/zap-report.json" ] &&
+                    ! jq -e '
+                      (.site | type == "array") and
+                      (.site | length > 0) and
+                      all(.site[]; (.alerts | type == "array"))
+                    ' "$EVIDENCE_DIR/zap-report.json" >/dev/null; then
+                    echo "Relatório JSON do ZAP inválido." \
                       | tee -a "$EVIDENCE_DIR/error.txt"
+                    validation_error=1
+                  fi
+
+                  if ! jq -e '
+                    (.schemaVersion == 1) and
+                    (.completed == true) and
+                    (.total > 0) and
+                    (.counts | type == "object") and
+                    (.tests | type == "array") and
+                    ((.tests | length) == .total)
+                  ' "$EVIDENCE_DIR/dast-tests.json" >/dev/null; then
+                    echo "A suíte complementar está incompleta ou inconclusiva." \
+                      | tee -a "$EVIDENCE_DIR/error.txt"
+                    validation_error=1
+                  fi
+
+                  if [ "$status" -ne 0 ]; then
+                    echo "Falha na execução do OWASP ZAP (código $status)." \
+                      | tee -a "$EVIDENCE_DIR/error.txt"
+                    exit "$status"
+                  fi
+
+                  if [ "$validation_error" -ne 0 ]; then
                     exit 1
                   fi
 
-                  jq -r '
-                    [
-                      .site[]?.alerts[]? |
-                      (.riskcode // "" | tostring)
-                    ] as $risks |
-                    "zap_alerts_high=\([$risks[] | select(. == "3")] | length)",
-                    "zap_alerts_medium=\([$risks[] | select(. == "2")] | length)",
-                    "zap_alerts_low=\([$risks[] | select(. == "1")] | length)",
-                    "zap_alerts_informational=\([$risks[] | select(. == "0")] | length)",
-                    "zap_alerts_unknown=\([$risks[] | select(
-                      . != "0" and . != "1" and . != "2" and . != "3"
-                    )] | length)"
-                  ' "$EVIDENCE_DIR/zap-report.json" \
-                    >> "$EVIDENCE_DIR/metadata.txt"
-
                   echo "reports_validated=true" \
+                    >> "$EVIDENCE_DIR/metadata.txt"
+                  echo "dast_test_suite_validated=true" \
                     >> "$EVIDENCE_DIR/metadata.txt"
 
             - name: Collect DAST evidence
@@ -562,13 +670,13 @@ jobs:
                   name: dast-evidence-${{ inputs.experiment_group }}
                   path: evidence/dast/
                   if-no-files-found: warn
-                  retention-days: 14
+                  retention-days: 90
 
     # 5. Artefato Final de Análise SAST, DAST e SCA
     analysis:
         name: Consolidated Security Analysis
         runs-on: ubuntu-24.04
-        needs: [sast, sca, dast]
+        needs: [validate, sast, sca, dast]
         if: ${{ always() }}
 
         steps:
@@ -596,6 +704,10 @@ jobs:
               shell: bash
               env:
                   EXPERIMENT_GROUP: ${{ inputs.experiment_group }}
+                  VALIDATE_STATUS: ${{ needs.validate.result }}
+                  SAST_STATUS: ${{ needs.sast.result }}
+                  SCA_STATUS: ${{ needs.sca.result }}
+                  DAST_STATUS: ${{ needs.dast.result }}
               run: |
                   set -euo pipefail
 
@@ -607,7 +719,7 @@ jobs:
                     local source="$1"
                     local target="$2"
 
-                    if [ -s "$source" ] &&
+                    if [ -n "$source" ] && [ -s "$source" ] &&
                       jq -e 'type == "object"' "$source" >/dev/null 2>&1; then
                       cp "$source" "$REPORTS/$target"
                       echo "Incluído: $target"
@@ -625,6 +737,7 @@ jobs:
                   copy_report "$(find_report npm-audit-all.json)" sca-all-report.json
                   copy_report "$(find_report npm-audit-production.json)" sca-production-report.json
                   copy_report "$(find_report zap-report.json)" dast-zap-report.json
+                  copy_report "$(find_report dast-tests.json)" dast-tests.json
 
                   {
                     echo "# Relatório consolidado de segurança"
@@ -637,6 +750,15 @@ jobs:
                     echo "- Commit: \`$GITHUB_SHA\`"
                     echo "- Grupo experimental: \`$EXPERIMENT_GROUP\`"
                     echo "- Data UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
+                    echo
+                    echo "## Estado dos jobs"
+                    echo
+                    echo "| Etapa | Resultado do GitHub Actions |"
+                    echo "|---|---|"
+                    echo "| Validação | $VALIDATE_STATUS |"
+                    echo "| SAST | $SAST_STATUS |"
+                    echo "| SCA | $SCA_STATUS |"
+                    echo "| DAST | $DAST_STATUS |"
                     echo
 
                     echo "## SAST — Semgrep"
@@ -727,31 +849,58 @@ jobs:
                       ' "$REPORTS/dast-zap-report.json"
 
                       echo
-                      echo "Os resultados representam os alertas registrados pelo OWASP ZAP, incluindo os testes complementares incorporados ao relatório. Cada alerta é contabilizado uma vez; o número de ocorrências pode ser maior que o número de alertas."
+                      echo "Os totais correspondem aos alertas registrados no JSON original do ZAP. Os resultados dos testes complementares são apresentados separadamente."
                     else
                       echo "Relatório DAST ausente ou inválido; não foi possível determinar os totais."
+                    fi
+
+                    echo
+                    echo "## Execução dos testes complementares DAST"
+                    echo
+
+                    if [ -s "$REPORTS/dast-tests.json" ] &&
+                      jq -e '
+                        (.schemaVersion == 1) and
+                        (.counts | type == "object") and
+                        (.tests | type == "array") and
+                        ((.tests | length) == .total)
+                      ' "$REPORTS/dast-tests.json" >/dev/null 2>&1; then
+
+                      jq -r '
+                        "| Resultado | Quantidade |",
+                        "|---|---:|",
+                        "| PASS | \(.counts.PASS // 0) |",
+                        "| FAIL | \(.counts.FAIL // 0) |",
+                        "| NOT_EVALUATED | \(.counts.NOT_EVALUATED // 0) |",
+                        "| ERROR | \(.counts.ERROR // 0) |",
+                        "| Total de resultados | \(.total) |",
+                        "",
+                        "Conclusão da suíte: \(if .completed == true and (.counts.ERROR // 0) == 0 and (.counts.NOT_EVALUATED // 0) == 0 then "completa" else "inconclusiva" end)."
+                      ' "$REPORTS/dast-tests.json"
+                    else
+                      echo "Resumo ausente ou inválido. Não foi possível comprovar a execução da suíte complementar."
                     fi
 
                     echo
                     echo "## Limitações e interpretação"
                     echo
                     echo "- Os resultados representam achados reportados pelas ferramentas, não vulnerabilidades confirmadas individualmente."
-                    echo "- Cada ferramenta mantém sua própria classificação de severidade, sem conversão para uma escala comum."
+                    echo "- As severidades são mantidas conforme a classificação original de cada ferramenta."
                     echo "- No SAST, os achados são contabilizados conforme os resultados presentes no JSON do Semgrep."
-                    echo "- No SCA, os totais são os reportados pelo npm audit e podem incluir vulnerabilidades em dependências transitivas."
-                    echo "- Os relatórios de todas as dependências e de produção representam escopos distintos e não devem ser somados."
-                    echo "- No DAST, os totais correspondem aos alertas presentes no relatório JSON do OWASP ZAP, incluindo os testes complementares registrados como alertas pela ferramenta."
-                    echo "- Os totais de SAST, SCA e DAST não devem ser somados automaticamente, pois as ferramentas analisam aspectos diferentes e podem identificar problemas relacionados."
+                    echo "- No SCA, os totais são os reportados pelo npm audit. Os relatórios de todas as dependências e de produção possuem escopos distintos e não devem ser somados."
+                    echo "- No DAST, a tabela de severidade considera os alertas presentes no relatório JSON original do ZAP."
+                    echo "- PASS, FAIL, NOT_EVALUATED e ERROR são estados de execução dos testes complementares e não são somados aos alertas por severidade."
                     echo "- A ausência de um relatório não significa ausência de vulnerabilidades."
-                    echo "- A existência de um relatório não comprova, isoladamente, que a análise foi concluída com sucesso."
+                    echo "- A existência de um relatório, isoladamente, não comprova que a análise foi concluída com sucesso."
                     echo "- Os relatórios JSON originais são preservados para auditoria."
+                    echo "- Os totais de SAST, SCA e DAST não devem ser somados automaticamente."
                     echo
 
                     echo "## Relatórios JSON incluídos"
                     echo
 
                     found=false
-                    for file in "$REPORTS"/*-report.json; do
+                    for file in "$REPORTS"/*.json; do
                       [ -f "$file" ] || continue
                       echo "- \`$(basename "$file")\`"
                       found=true
@@ -771,6 +920,6 @@ jobs:
                   name: analysis-evidence
                   path: |
                       analysis/analysis.md
-                      analysis/reports/*-report.json
+                      analysis/reports/*.json
                   if-no-files-found: warn
                   retention-days: 90

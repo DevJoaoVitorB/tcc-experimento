@@ -43,8 +43,13 @@ const System = Java.type('java.lang.System');
 const ScanRuleMetadata = Java.type(
     'org.zaproxy.addon.commonlib.scanrules.ScanRuleMetadata'
 );
+const Files = Java.type('java.nio.file.Files');
+const Paths = Java.type('java.nio.file.Paths');
+const StandardCharsets = Java.type('java.nio.charset.StandardCharsets');
 
 var suiteExecuted = false;
+var testResults = [];
+var infrastructureErrors = [];
 
 function getMetadata() {
     return ScanRuleMetadata.fromYaml(`
@@ -67,7 +72,10 @@ function scan(helper, msg, param, value) {
     try {
         runSuite(helper, msg, getBaseUrl(msg));
     } catch (e) {
-        print('[DAST] INFRA_ERROR: ' + String(e));
+        infrastructureErrors.push(String(e));
+        print('[DAST] ERROR: falha não tratada na suíte: ' + String(e));
+    } finally {
+        writeSummary();
     }
 }
 
@@ -141,6 +149,7 @@ function isRejected(status) {
 }
 
 function finding(helper, response, testName, detail, risk, evidence) {
+    recordResult(testName, 'FAIL', response.status, detail, evidence || 'HTTP ' + response.status);
     print('[DAST] ' + testName + ' => FAIL; ' + detail);
     helper.newAlert()
         .setRisk(risk === undefined || risk === null ? 2 : risk)
@@ -158,9 +167,39 @@ function finding(helper, response, testName, detail, risk, evidence) {
         .raise();
 }
 
+function recordResult(name, outcome, status, detail, evidence) {
+    testResults.push({
+        id: name, outcome: outcome, httpStatus: status === undefined ? null : status,
+        detail: String(detail || ''), evidence: String(evidence || '')
+    });
+}
+
 function result(name, status, passed, detail) {
-    print('[DAST] ' + name + ' => ' +
-        (passed ? 'PASS' : 'NOT_EVALUATED') + '; HTTP ' + status + '; ' + detail);
+    var outcome = passed ? 'PASS' : 'NOT_EVALUATED';
+    if (!passed && Number(status) >= 500) outcome = 'ERROR';
+    recordResult(name, outcome, status, detail, 'HTTP ' + status);
+    print('[DAST] ' + name + ' => ' + outcome + '; HTTP ' + status + '; ' + detail);
+}
+
+function writeSummary() {
+    var counts = { PASS: 0, FAIL: 0, NOT_EVALUATED: 0, ERROR: 0 };
+    for (var i = 0; i < testResults.length; i++) {
+        var outcome = testResults[i].outcome;
+        counts[outcome] = (counts[outcome] || 0) + 1;
+    }
+    var summary = {
+        schemaVersion: 1, completed: infrastructureErrors.length === 0,
+        total: testResults.length, counts: counts,
+        infrastructureErrors: infrastructureErrors, tests: testResults
+    };
+    try {
+        var output = Paths.get('/zap/out/dast-tests.json');
+        Files.write(output, new java.lang.String(JSON.stringify(summary, null, 2)).getBytes(StandardCharsets.UTF_8));
+        print('[DAST] Resumo da suíte salvo em /zap/out/dast-tests.json; ' + JSON.stringify(counts));
+    } catch (e) {
+        print('[DAST] ERROR: não foi possível gravar dast-tests.json: ' + String(e));
+        throw e;
+    }
 }
 
 function checkRejected(helper, response, name, detail, risk) {
@@ -190,7 +229,11 @@ function registerAccount(helper, original, base, label) {
     });
     a.created = [200, 201, 202].indexOf(reg.status) >= 0;
     print('[DAST][PREP] cadastro ' + label + ': HTTP ' + reg.status);
-    if (!a.created) return a;
+    if (!a.created) {
+        recordResult('Preparação: cadastro da conta ' + label, reg.status >= 500 ? 'ERROR' : 'NOT_EVALUATED', reg.status, 'Não foi possível criar a conta de teste.');
+        return a;
+    }
+    recordResult('Preparação: cadastro da conta ' + label, 'PASS', reg.status, 'Conta temporária criada.');
 
     var login = send(helper, original, base, 'POST', '/auth/login', {
         body: { email: a.email, password: a.password }
@@ -201,6 +244,8 @@ function registerAccount(helper, original, base, label) {
     }
     print('[DAST][PREP] login ' + label + ': HTTP ' + login.status +
         '; access=' + Boolean(a.access) + '; refresh=' + Boolean(a.refresh));
+    if (a.access) recordResult('Preparação: login da conta ' + label, 'PASS', login.status, 'Access token obtido.');
+    else recordResult('Preparação: login da conta ' + label, login.status >= 500 ? 'ERROR' : 'NOT_EVALUATED', login.status, 'Access token não obtido.');
     return a;
 }
 
@@ -231,12 +276,21 @@ function containsCredentialLeak(response, password) {
     return walk(data, '');
 }
 
-function checkNoCredentialLeak(helper, response, name, password) {
+function checkNoCredentialLeak(helper, response, name, password, expectedStatus) {
     var leak = containsCredentialLeak(response, password);
     if (leak) {
         finding(helper, response, name,
             'A resposta contém a senha enviada ou um campo de senha/hash não vazio (' + leak + ').',
             3, leak);
+    } else if (response.status >= 500) {
+        result(name, response.status, false,
+            'A API retornou erro 5xx; não é possível concluir a verificação de exposição de credenciais.');
+    } else if (expectedStatus === 'rejected' && !isRejected(response.status)) {
+        result(name, response.status, false,
+            'A resposta não apresentou um status de rejeição esperado; resultado inconclusivo.');
+    } else if (expectedStatus !== 'rejected' && !is2xx(response.status)) {
+        result(name, response.status, false,
+            'Status HTTP inesperado para esta verificação; resultado inconclusivo.');
     } else {
         result(name, response.status, true,
             'Nenhuma senha sentinela ou campo explícito de senha/hash foi detectado; isso não prova segurança do armazenamento.');
@@ -283,7 +337,7 @@ function runSuite(helper, original, base) {
                 'Não foi possível confirmar o formato de identidade nas respostas; revisão manual necessária.');
         }
     } else {
-        print('[DAST] Isolamento dos perfis A/B => NOT_EVALUATED; duas contas/tokens não disponíveis.');
+        result('Isolamento dos perfis A/B', null, false, 'Duas contas/tokens não disponíveis.');
     }
 
     /*
@@ -296,7 +350,7 @@ function runSuite(helper, original, base) {
         checkRejected(helper, refreshAsAccess, 'Refresh token usado como access token',
             'Um refresh token não deve autorizar acesso a recursos protegidos.', 3);
     } else {
-        print('[DAST] Refresh token usado como access token => NOT_EVALUATED; refresh token ausente.');
+        result('Refresh token usado como access token', null, false, 'Refresh token ausente.');
     }
 
     if (a.access) {
@@ -306,7 +360,7 @@ function runSuite(helper, original, base) {
         checkRejected(helper, accessAsRefresh, 'Access token usado como refresh token',
             'Um access token não deve ser aceito como credencial de renovação.', 3);
     } else {
-        print('[DAST] Access token usado como refresh token => NOT_EVALUATED; access token ausente.');
+        result('Access token usado como refresh token', null, false, 'Access token ausente.');
     }
 
     /*
@@ -359,10 +413,10 @@ function runSuite(helper, original, base) {
                         'Logout não confirmou sucesso; invalidação não avaliada. Verifique o contrato da API.');
                 }
             } else {
-                print('[DAST] Refresh token após logout => NOT_EVALUATED; tokens da sessão de logout ausentes.');
+                result('Refresh token após logout', null, false, 'Tokens da sessão de logout ausentes.');
             }
         } else {
-            print('[DAST] Rotação/logout de refresh token => NOT_EVALUATED; refresh token ausente.');
+            result('Rotação/logout de refresh token', null, false, 'Refresh token ausente.');
         }
     }
 
@@ -382,11 +436,13 @@ function runSuite(helper, original, base) {
         body: { email: 'missing-' + rand() + '@example.invalid', password: 'Sentinel-' + rand() + '!' }
     });
     checkNoCredentialLeak(helper, regCheck, 'Cadastro não expõe senha/hash', credentialSentinel);
-    checkNoCredentialLeak(helper, loginInvalid, 'Login inválido não expõe senha/hash', null);
+    checkNoCredentialLeak(helper, loginInvalid, 'Login inválido não expõe senha/hash', null, 'rejected');
 
     if (a.access) {
         var profile = send(helper, original, base, 'GET', '/users/me', { token: a.access });
         checkNoCredentialLeak(helper, profile, 'Perfil não expõe senha/hash', a.password);
+    } else {
+        result('Perfil não expõe senha/hash', null, false, 'Não foi possível obter access token para consultar o perfil.');
     }
 
     print('[DAST] Fim da suíte complementar.');
