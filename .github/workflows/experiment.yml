@@ -495,7 +495,9 @@ jobs:
               shell: bash
               run: |
                   set -uo pipefail
-                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/evidence/dast"
+                  mkdir -p "$EVIDENCE_DIR"
+                  export EVIDENCE_DIR
 
                   chmod -R a+rwX "$EVIDENCE_DIR"
 
@@ -515,14 +517,21 @@ jobs:
                   echo "zap_exit_code=$status" \
                     >> "$EVIDENCE_DIR/metadata.txt"
 
-                  # Cria um resumo estruturado a partir dos resultados do script.
-                  # FAIL é um resultado de teste, não necessariamente falha de execução.
+                  # Gera o resumo estruturado da suíte complementar.
                   node <<'NODE'
                   const fs = require('fs');
                   const path = require('path');
 
-                  const dir = path.join(process.env.GITHUB_WORKSPACE,
-                                        process.env.EVIDENCE_DIR);
+                  const dir = process.env.EVIDENCE_DIR;
+
+                  if (!dir || !path.isAbsolute(dir)) {
+                    throw new Error(
+                      'EVIDENCE_DIR deve conter um caminho absoluto.'
+                    );
+                  }
+
+                  fs.mkdirSync(dir, { recursive: true });
+
                   const logPath = path.join(dir, 'zap.log');
                   const outputPath = path.join(dir, 'dast-tests.json');
 
@@ -551,7 +560,9 @@ jobs:
                   }
 
                   const infraErrors = [
-                    ...log.matchAll(/^\[DAST\]\s+INFRA_ERROR:\s*(.*)$/gm)
+                    ...log.matchAll(
+                      /^\[DAST\]\s+INFRA_ERROR:\s*(.*)$/gm
+                    )
                   ];
 
                   for (const match of infraErrors) {
@@ -600,7 +611,7 @@ jobs:
                   echo "dast_tests_error=$(jq -r '.counts.ERROR' "$EVIDENCE_DIR/dast-tests.json")" \
                     >> "$EVIDENCE_DIR/metadata.txt"
 
-                  # Validar relatórios mesmo se o ZAP tiver retornado código diferente de zero.
+                  # Valida os relatórios gerados pelo ZAP.
                   validation_error=0
 
                   for report in zap-report.json zap-report.html; do
