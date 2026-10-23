@@ -73,20 +73,11 @@ jobs:
           context: authentication-api
           targetUrl: http://127.0.0.1:3000
 
-    # 4. Descobre rotas dentro do contexto da API.
-    - type: spider
-      parameters:
-          context: authentication-api
-          url: http://127.0.0.1:3000/health
-          maxDuration: 5
-
-    # 5. Executa a análise dinâmica no contexto importado do OpenAPI.
-    # A URL-base evita limitar o Active Scan apenas ao endpoint /health.
+    # 4. Executa a análise dinâmica nas rotas importadas do OpenAPI.
     - type: activeScan
       parameters:
           context: authentication-api
           url: http://127.0.0.1:3000
-          context: authentication-api
           defaultStrength: Medium
           defaultThreshold: Medium
           maxScanDurationInMins: 15
@@ -98,12 +89,12 @@ jobs:
           defaultStrength: Medium
           defaultThreshold: Medium
 
-    # 6. Aguarda a conclusão da análise passiva.
+    # 5. Aguarda a conclusão da análise passiva.
     - type: passiveScan-wait
       parameters:
           maxDuration: 5
 
-    # 7. Gera o relatório JSON.
+    # 6. Gera o relatório JSON.
     - type: report
       parameters:
           template: traditional-json
@@ -112,7 +103,7 @@ jobs:
           reportTitle: 'DAST - Authentication API - RS01-RS07'
           reportDescription: 'Resultados da análise dinâmica da API de autenticação.'
 
-    # 8. Gera o relatório HTML.
+    # 7. Gera o relatório HTML.
     - type: report
       parameters:
           template: traditional-html
