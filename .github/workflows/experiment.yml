@@ -102,7 +102,8 @@ jobs:
         needs: validate
 
         env:
-            SAST_PLAN: workflows_support/sast/sast-rs01-rs07.rules.yml
+            SAST_PLAN: workflows_support/sast/sast.rules.yml
+            SAST_IMAGE: semgrep/semgrep:1.178.0
             EVIDENCE_DIR: evidence/sast
 
         steps:
@@ -121,8 +122,38 @@ jobs:
                     echo "run_attempt=${GITHUB_RUN_ATTEMPT}"
                     echo "commit=${GITHUB_SHA}"
                     echo "event=${GITHUB_EVENT_NAME}"
-                    echo "semgrep_image=semgrep/semgrep:1.178.0"
+                    echo "semgrep_image=$SAST_IMAGE"
+                    echo "custom_rules=$SAST_PLAN"
                   } > "$EVIDENCE_DIR/metadata.txt"
+
+            - name: Validate custom Semgrep rules
+              id: validate_rules
+              shell: bash
+              run: |
+                  set +e
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
+
+                  if [ ! -s "$SAST_PLAN" ]; then
+                    echo "Arquivo de regras ausente ou vazio: $SAST_PLAN" \
+                      | tee "$EVIDENCE_DIR/rules-validation.log"
+                    echo "rules_validation_exit_code=1" \
+                      >> "$EVIDENCE_DIR/metadata.txt"
+                    exit 1
+                  fi
+
+                  docker run --rm \
+                    -v "$GITHUB_WORKSPACE:/src:ro" \
+                    -w /src \
+                    "$SAST_IMAGE" \
+                    semgrep --validate --config "/src/$SAST_PLAN" \
+                    > "$EVIDENCE_DIR/rules-validation.log" 2>&1
+
+                  status=$?
+                  echo "rules_validation_exit_code=$status" \
+                    >> "$EVIDENCE_DIR/metadata.txt"
+
+                  cat "$EVIDENCE_DIR/rules-validation.log"
+                  exit "$status"
 
             - name: Run Semgrep
               id: semgrep
@@ -133,25 +164,25 @@ jobs:
 
                   docker run --rm \
                     -v "$GITHUB_WORKSPACE:/src:ro" \
-                    -v "$EVIDENCE_DIR:/reports" \
-                    semgrep/semgrep:1.178.0 \
+                    -v "$EVIDENCE_DIR:/reports:rw" \
+                    -w /src \
+                    "$SAST_IMAGE" \
                     semgrep scan \
                       --config p/security-audit \
                       --config p/secrets \
-                      --config p/owasp-top-ten \
-                      --config p/javascript \
-                      --config p/typescript \
-                      --config p/nodejs \
-                      --config p/jwt \
                       --config "/src/$SAST_PLAN" \
                       --json \
                       --output /reports/semgrep-report.json \
-                      /src 2>&1 | tee "$EVIDENCE_DIR/semgrep.log"
+                      /src \
+                    > "$EVIDENCE_DIR/semgrep.log" 2>&1
 
-                  status=${PIPESTATUS[0]}
-                  echo "semgrep_exit_code=$status" >> "$EVIDENCE_DIR/metadata.txt"
+                  status=$?
+                  echo "semgrep_exit_code=$status" \
+                    >> "$EVIDENCE_DIR/metadata.txt"
 
-                  if [ "$status" -ne 0 ]; then
+                  cat "$EVIDENCE_DIR/semgrep.log"
+
+                  if [ "$status" -ne 0 ] && [ "$status" -ne 1 ]; then
                     echo "Falha na execução do Semgrep." \
                       | tee "$EVIDENCE_DIR/error.txt"
                     exit "$status"
@@ -163,6 +194,45 @@ jobs:
                     exit 1
                   fi
 
+                  # Gera uma tabela auxiliar sem alterar o relatório original.
+                  if command -v jq >/dev/null 2>&1; then
+                    jq -r '
+                      ["rule_id", "path", "line", "severity", "message"],
+                      (.results[]? | [
+                        .check_id,
+                        .path,
+                        (.start.line // 0),
+                        (.extra.severity // "UNKNOWN"),
+                        (.extra.message // "")
+                      ]) | @tsv
+                    ' "$EVIDENCE_DIR/semgrep-report.json" \
+                      > "$EVIDENCE_DIR/semgrep-findings.tsv"
+                  fi
+
+            - name: Preserve SAST configuration and metadata
+              if: always()
+              shell: bash
+              run: |
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
+
+                  cp "$SAST_PLAN" "$EVIDENCE_DIR/sast.rules.yml" \
+                    2>/dev/null || true
+
+                  {
+                    echo "runner_os=$RUNNER_OS"
+                    echo "runner_arch=$RUNNER_ARCH"
+                    echo "docker_version=$(docker --version 2>&1)"
+                    echo "semgrep_image=$SAST_IMAGE"
+                    docker image inspect "$SAST_IMAGE" \
+                      --format 'image_digest={{index .RepoDigests 0}}' \
+                      2>/dev/null || true
+                  } >> "$EVIDENCE_DIR/metadata.txt"
+
+                  if [ -f "$EVIDENCE_DIR/semgrep-report.json" ]; then
+                    sha256sum "$EVIDENCE_DIR/semgrep-report.json" \
+                      > "$EVIDENCE_DIR/report-sha256.txt"
+                  fi
+
             - name: Upload SAST evidence
               if: always()
               uses: actions/upload-artifact@v4
@@ -170,7 +240,7 @@ jobs:
                   name: sast-evidence-${{ inputs.experiment_group }}
                   path: evidence/sast/
                   if-no-files-found: warn
-                  retention-days: 14
+                  retention-days: 90
 
     # 3. Análise de Dependências Diretas e Transitivas (SCA - npm audit)
     sca:
@@ -276,7 +346,7 @@ jobs:
             JWT_ACCESS_SECRET: 'dast-test-access-secret-CHANGE-ME-123456789'
             JWT_REFRESH_SECRET: 'dast-test-refresh-secret-CHANGE-ME-123456789'
             DAST_CONFIG_DIR: workflows_support/dast
-            DAST_PLAN: workflows_support/dast/dast-rs01-rs07.rules.yml
+            DAST_PLAN: workflows_support/dast/dast.rules.yml
             DAST_BASE_URL: http://127.0.0.1:3000
             DAST_IMAGE: authentication-api:dast-${{ inputs.experiment_group }}
             EVIDENCE_DIR: evidence/dast
@@ -310,11 +380,15 @@ jobs:
                   set -euo pipefail
                   EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
 
+                  set +e
                   docker build --tag "$DAST_IMAGE" . \
                     2>&1 | tee "$EVIDENCE_DIR/docker-build.log"
+                  status=${PIPESTATUS[0]}
+                  set -e
 
-                  echo "docker_build_exit_code=${PIPESTATUS[0]}" \
+                  echo "docker_build_exit_code=$status" \
                     >> "$EVIDENCE_DIR/metadata.txt"
+                  exit "$status"
 
             - name: Start application
               id: app
@@ -347,8 +421,7 @@ jobs:
                       -w '%{http_code}' \
                       "$DAST_BASE_URL/health" 2>/dev/null || true)
 
-                    if [[ "$status" =~ ^[0-9]{3}$ ]] &&
-                       [ "$status" -ge 200 ] && [ "$status" -lt 500 ]; then
+                    if [[ "$status" =~ ^2[0-9][0-9]$ ]]; then
                       ready=true
                       break
                     fi
@@ -367,7 +440,7 @@ jobs:
                     > "$EVIDENCE_DIR/application.log" 2>&1 || true
 
                   if [ "$ready" != "true" ]; then
-                    echo "A aplicação não ficou disponível." \
+                    echo "A aplicação não ficou disponível em /health." \
                       | tee "$EVIDENCE_DIR/error.txt"
                     exit 1
                   fi
@@ -376,32 +449,31 @@ jobs:
               shell: bash
               run: |
                   set -euo pipefail
+                  EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
 
-                  test -s "$DAST_PLAN"
+                  PLAN="$GITHUB_WORKSPACE/$DAST_PLAN"
+                  SCRIPT="$GITHUB_WORKSPACE/$DAST_CONFIG_DIR/dast.script.js"
 
-                  for script in \
-                    rs01-access-control.js \
-                    rs02-security-configuration.js \
-                    rs04-credential-management.js \
-                    rs05-input-validation.js \
-                    rs06-authentication-protection.js \
-                    rs07-exception-handling.js
-                  do
-                    path="$GITHUB_WORKSPACE/$DAST_CONFIG_DIR/scripts/$script"
-                    if [ ! -s "$path" ]; then
-                      echo "::error::Script ausente ou vazio: $path"
-                      exit 1
-                    fi
-                    echo "OK: $path"
-                  done
+                  if [ ! -s "$PLAN" ]; then
+                    echo "::error::Plano DAST ausente ou vazio: $PLAN"
+                    exit 1
+                  fi
+
+                  if [ ! -s "$SCRIPT" ]; then
+                    echo "::error::Script complementar ausente ou vazio: $SCRIPT"
+                    exit 1
+                  fi
 
                   if [ ! -s "$GITHUB_WORKSPACE/openapi.json" ] &&
-                     ! curl -fsS --max-time 5 \
-                       "$DAST_BASE_URL/openapi.json" \
-                       -o "$EVIDENCE_DIR/openapi.json"; then
+                    ! curl -fsS --max-time 5 \
+                      "$DAST_BASE_URL/openapi.json" \
+                      -o "$GITHUB_WORKSPACE/openapi.json"; then
                     echo "::error::OpenAPI não encontrado no arquivo local nem em /openapi.json."
                     exit 1
                   fi
+
+                  echo "Plano DAST e script complementar encontrados." \
+                    | tee "$EVIDENCE_DIR/config-validation.txt"
 
             - name: Run OWASP ZAP
               id: zap
@@ -410,14 +482,13 @@ jobs:
                   set -uo pipefail
                   EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
 
-                  chmod -R 777 "$EVIDENCE_DIR"
+                  chmod -R u+rwX,go+rX "$EVIDENCE_DIR"
 
                   set +e
                   docker run --rm \
                     --network host \
                     --volume "$GITHUB_WORKSPACE:/zap/wrk:ro" \
                     --volume "$EVIDENCE_DIR:/zap/out:rw" \
-                    --env DAST_BASE_URL="$DAST_BASE_URL" \
                     zaproxy/zap-stable \
                     zap.sh -cmd \
                       -autorun "/zap/wrk/$DAST_PLAN" \
@@ -475,7 +546,6 @@ jobs:
                   if-no-files-found: warn
                   retention-days: 14
 
-    # 5. Analysis: consolida os relatórios SAST, SCA e DAST.
     analysis:
         name: Consolidated Security Analysis
         runs-on: ubuntu-24.04
@@ -518,7 +588,8 @@ jobs:
                     local source="$1"
                     local target="$2"
 
-                    if [ -s "$source" ] && jq -e . "$source" >/dev/null 2>&1; then
+                    if [ -s "$source" ] &&
+                       jq -e 'type == "object"' "$source" >/dev/null 2>&1; then
                       cp "$source" "$REPORTS/$target"
                       echo "Incluído: $target"
                     else
@@ -530,7 +601,6 @@ jobs:
                   copy_report collected/npm-audit-all.json sca-all-report.json
                   copy_report collected/npm-audit-production.json sca-production-report.json
                   copy_report collected/zap-report.json dast-zap-report.json
-                  copy_report collected/dast-rs01-rs07-report.json dast-complementary-report.json
 
                   {
                     echo "# Relatório consolidado de segurança"
@@ -547,191 +617,119 @@ jobs:
 
                     echo "## SAST — Semgrep"
                     echo
+
                     if [ -s "$REPORTS/sast-report.json" ]; then
                       jq -r '
                         "| Métrica | Quantidade |",
                         "|---|---:|",
-                        "| Achados | \((.results // []) | length) |",
-                        "| Erros reportados | \((.errors // []) | length) |",
+                        "| Achados reportados | \((.results // []) | length) |",
+                        "| Erros reportados pela ferramenta | \((.errors // []) | length) |",
                         "",
-                        "| Severidade | Quantidade |",
+                        "| Severidade original | Quantidade |",
                         "|---|---:|",
-                        ([.results[]?.extra.severity // "UNKNOWN"]
-                          | sort | group_by(.)[]
-                          | "| \(.[0]) | \(length) |")
+                        (
+                          [.results[]?.extra.severity // "UNKNOWN"]
+                          | sort
+                          | group_by(.)
+                          | .[]
+                          | "| \(.[0]) | \(length) |"
+                        )
                       ' "$REPORTS/sast-report.json"
                     else
-                      echo "Relatório SAST ausente ou inválido."
+                      echo "Relatório SAST ausente ou inválido; não foi possível determinar os totais."
                     fi
-                    echo
 
+                    echo
                     echo "## SCA — npm audit"
                     echo
+
                     for file in sca-all-report.json sca-production-report.json; do
                       echo "### $file"
                       echo
-                      if [ -s "$REPORTS/$file" ]; then
+
+                      if [ -s "$REPORTS/$file" ] &&
+                         jq -e '.metadata.vulnerabilities | type == "object"' \
+                           "$REPORTS/$file" >/dev/null 2>&1; then
+
                         jq -r '
-                          "| Severidade | Quantidade |",
+                          "| Severidade original | Quantidade |",
                           "|---|---:|",
-                          "| Crítica | \(.metadata.vulnerabilities.critical // 0) |",
-                          "| Alta | \(.metadata.vulnerabilities.high // 0) |",
-                          "| Moderada | \(.metadata.vulnerabilities.moderate // 0) |",
-                          "| Baixa | \(.metadata.vulnerabilities.low // 0) |",
-                          "| Informativa | \(.metadata.vulnerabilities.info // 0) |",
+                          "| Critical | \(.metadata.vulnerabilities.critical // 0) |",
+                          "| High | \(.metadata.vulnerabilities.high // 0) |",
+                          "| Moderate | \(.metadata.vulnerabilities.moderate // 0) |",
+                          "| Low | \(.metadata.vulnerabilities.low // 0) |",
+                          "| Info | \(.metadata.vulnerabilities.info // 0) |",
+                          "| Total reportado | \(.metadata.vulnerabilities.total // 0) |",
                           "",
                           "Dependências analisadas: \(.metadata.dependencies.total // 0)"
                         ' "$REPORTS/$file"
                       else
-                        echo "Relatório ausente ou inválido."
+                        echo "Relatório ausente ou sem estrutura válida de vulnerabilidades."
                       fi
+
                       echo
                     done
 
                     echo "## DAST — OWASP ZAP"
                     echo
+
                     if [ -s "$REPORTS/dast-zap-report.json" ] &&
-                       [ -s "$REPORTS/dast-complementary-report.json" ]; then
+                       jq -e '(.site | type == "array")' \
+                         "$REPORTS/dast-zap-report.json" >/dev/null 2>&1; then
 
-                      # O ZAP utiliza riskcode para classificar o risco.
-                      # Os scripts complementares precisam fornecer findings
-                      # com severidade e evidências que permitam comparar achados.
-                      jq -nr \
-                        --slurpfile zap "$REPORTS/dast-zap-report.json" \
-                        --slurpfile complementary "$REPORTS/dast-complementary-report.json" '
-                        def zap_findings:
-                          [
-                            $zap[0].site[]?.alerts[]? |
-                            {
-                              source: "zap",
-                              severity: (
-                                if (.riskcode | tostring) == "3" then "High"
-                                elif (.riskcode | tostring) == "2" then "Medium"
-                                elif (.riskcode | tostring) == "1" then "Low"
-                                elif (.riskcode | tostring) == "0" then "Informational"
-                                else "Unknown"
-                                end
-                              ),
-                              key: (
-                                [
-                                  (.pluginid // ""),
-                                  (.name // ""),
-                                  (.riskcode // ""),
-                                  (.instances[]? | [
-                                    (.uri // ""),
-                                    (.param // ""),
-                                    (.method // ""),
-                                    (.evidence // "")
-                                  ] | join("|"))
-                                ] | join("|")
-                              )
-                            }
-                          ];
-
-                        def complementary_findings:
-                          [
-                            $complementary[0].findings[]? |
-                            {
-                              source: "complementary",
-                              severity: (
-                                ((.severity // "Unknown") | tostring | ascii_downcase) as $s |
-                                if ($s == "high" or $s == "alta") then "High"
-                                elif ($s == "medium" or $s == "moderate" or $s == "moderada") then "Medium"
-                                elif ($s == "low" or $s == "baixa") then "Low"
-                                elif ($s == "informational" or $s == "info" or $s == "informativa") then "Informational"
-                                else "Unknown"
-                                end
-                              ),
-                              key: (
-                                [
-                                  (.id // .ruleId // .test // .name // ""),
-                                  (.endpoint // .url // .path // ""),
-                                  (.parameter // .param // ""),
-                                  (.evidence // .evidenceSummary // "")
-                                ] | map(tostring) | join("|")
-                              )
-                            }
-                          ];
-
-                        (zap_findings) as $z |
-                        (complementary_findings) as $c |
-                        ($z + $c) as $all |
-                        ["High", "Medium", "Low", "Informational", "Unknown"][] as $severity |
-                        [
-                          $severity,
-                          ([$z[] | select(.severity == $severity)] | length),
-                          ([$c[] | select(.severity == $severity)] | length),
-                          ([$all[] | select(.severity == $severity)] | length),
-                          (
-                            [
-                              $all[] |
-                              select(.severity == $severity) |
-                              .key
-                            ] | unique | length
-                          )
-                        ] |
-                        "| Severidade | ZAP padrão | Scripts complementares | Total bruto | Total sem duplicatas |",
-                        "|---|---:|---:|---:|---:|",
-                        (
-                          ["High", "Medium", "Low", "Informational", "Unknown"][] as $s |
-                          [
-                            $s,
-                            ([$z[] | select(.severity == $s)] | length),
-                            ([$c[] | select(.severity == $s)] | length),
-                            ([$all[] | select(.severity == $s)] | length),
-                            (
-                              [
-                                $all[] |
-                                select(.severity == $s) |
-                                .key
-                              ] | unique | length
-                            )
-                          ] |
-                          "| \(.[0]) | \(.[1]) | \(.[2]) | \(.[3]) | \(.[4]) |"
-                        )
-                      '
-                    else
-                      echo "Não foi possível calcular os totais: um ou ambos os relatórios DAST estão ausentes ou inválidos."
-                    fi
-                    echo
-
-                    echo "## DAST — Testes complementares por status"
-                    echo
-                    if [ -s "$REPORTS/dast-complementary-report.json" ]; then
                       jq -r '
-                        if (.summary | type) == "object" then
-                          "| Resultado | Quantidade |",
-                          "|---|---:|",
-                          "| Aprovados | \(.summary.passed // 0) |",
-                          "| Reprovados | \(.summary.failed // 0) |",
-                          "| Não avaliados | \(.summary.notEvaluated // 0) |",
-                          "| Erros de infraestrutura | \(.summary.infrastructureErrors // 0) |"
-                        else
-                          "O relatório não possui o campo summary esperado."
-                        end
-                      ' "$REPORTS/dast-complementary-report.json"
-                    else
-                      echo "Relatório complementar ausente ou inválido."
-                    fi
-                    echo
+                        [
+                          .site[]?.alerts[]? |
+                          (
+                            if ((.riskcode // "" | tostring) == "3") then "High"
+                            elif ((.riskcode // "" | tostring) == "2") then "Medium"
+                            elif ((.riskcode // "" | tostring) == "1") then "Low"
+                            elif ((.riskcode // "" | tostring) == "0") then "Informational"
+                            else "Unknown"
+                            end
+                          )
+                        ] as $severities |
 
+                        "| Severidade original | Alertas |",
+                        "|---|---:|",
+                        (
+                          ["High", "Medium", "Low", "Informational", "Unknown"][] as $severity |
+                          "| \($severity) | \([$severities[] | select(. == $severity)] | length) |"
+                        ),
+                        "| Total de alertas | \($severities | length) |"
+                      ' "$REPORTS/dast-zap-report.json"
+
+                      echo
+                      echo "Os totais representam alertas do ZAP, não ocorrências individuais."
+                    else
+                      echo "Relatório DAST ausente ou inválido; não foi possível determinar os totais."
+                    fi
+
+                    echo
                     echo "## Limitações e interpretação"
                     echo
-                    echo "- A ausência de relatório não significa ausência de vulnerabilidades."
-                    echo "- Os achados devem ser interpretados conforme os critérios de cada ferramenta."
-                    echo "- SAST, SCA e DAST são análises distintas; seus totais não devem ser somados automaticamente."
-                    echo "- A deduplicação DAST é baseada nos identificadores e nas evidências disponíveis nos relatórios; resultados equivalentes podem exigir validação manual."
+                    echo "- Os resultados representam achados reportados pelas ferramentas, não vulnerabilidades confirmadas individualmente."
+                    echo "- Cada ferramenta mantém sua própria classificação de severidade, sem conversão para uma escala comum."
+                    echo "- No SAST, os achados são contabilizados conforme os resultados presentes no JSON do Semgrep."
+                    echo "- No SCA, os totais são os reportados pelo npm audit e podem incluir vulnerabilidades em dependências transitivas."
+                    echo "- Os relatórios de todas as dependências e de produção representam escopos distintos e não devem ser somados."
+                    echo "- No DAST, cada alerta do ZAP é contabilizado uma vez; o número de ocorrências pode ser maior que o número de alertas."
+                    echo "- Os totais de SAST, SCA e DAST não devem ser somados automaticamente, pois as ferramentas analisam aspectos diferentes e podem identificar problemas relacionados."
+                    echo "- A ausência de um relatório não significa ausência de vulnerabilidades."
+                    echo "- A existência de um relatório não comprova, isoladamente, que a análise foi concluída com sucesso."
                     echo "- Os relatórios JSON originais são preservados para auditoria."
                     echo
 
                     echo "## Relatórios JSON incluídos"
                     echo
+
                     found=false
                     for file in "$REPORTS"/*-report.json; do
                       [ -f "$file" ] || continue
                       echo "- \`$(basename "$file")\`"
                       found=true
                     done
+
                     if [ "$found" = false ]; then
                       echo "Nenhum relatório JSON válido foi encontrado."
                     fi

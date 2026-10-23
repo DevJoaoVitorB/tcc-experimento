@@ -1,0 +1,87 @@
+# Plano DAST: análise padrão do ZAP + testes comportamentais que exigem
+# conhecimento do contrato desta API (autorização, ciclo de tokens e credenciais).
+#
+# A análise padrão continua sendo executada pelo OpenAPI + Active Scan + Passive Scan.
+# O script complementar NÃO substitui as regras padrão do ZAP.
+#
+# Documentação oficial:
+# Automation Framework: https://www.zaproxy.org/docs/desktop/addons/automation-framework/
+# OpenAPI: https://www.zaproxy.org/docs/desktop/addons/openapi-support/automation/
+# Active Scan: https://www.zaproxy.org/docs/desktop/addons/automation-framework/job-ascan/
+# Script Scan Rules: https://www.zaproxy.org/docs/desktop/addons/script-console/scanrules/
+# Limitação do Active Scan para falhas lógicas de autorização: https://www.zaproxy.org/docs/desktop/start/features/ascan/
+
+env:
+    contexts:
+        - name: authentication-api
+          urls:
+              - http://127.0.0.1:3000
+          includePaths:
+              - 'http://127\.0\.0\.1:3000/.*'
+    vars:
+        baseUrl: http://127.0.0.1:3000
+
+jobs:
+    # Script de testes extras
+    - type: script
+      parameters:
+          action: add
+          type: active
+          engine: 'ECMAScript : Graal.js'
+          name: dast-script
+          source: dast.script.js
+
+    # Confirma que a API está disponível antes de importar e testar.
+    - type: requestor
+      requests:
+          - url: http://127.0.0.1:3000/health
+            name: Verificar disponibilidade da API
+            method: GET
+
+    # Importa endpoints documentados.
+    - type: openapi
+      parameters:
+          apiUrl: http://127.0.0.1:3000/openapi.json
+          context: authentication-api
+          targetUrl: http://127.0.0.1:3000
+
+    # Configura limites do Active Scan.
+    - type: activeScan-config
+      parameters:
+          maxScanDurationInMins: 15
+          maxRuleDurationInMins: 5
+          maxAlertsPerRule: 20
+          threadPerHost: 2
+
+    # Análise padrão do ZAP sobre os endpoints importados para o contexto.
+    - type: activeScan
+      parameters:
+          context: authentication-api
+          url: http://127.0.0.1:3000
+          threadPerHost: 2
+          maxAlertsPerRule: 20
+      policyDefinition:
+          defaultStrength: Medium
+          defaultThreshold: Medium
+
+    # Espera que a análise passiva termine antes de gerar os relatórios.
+    - type: passiveScan-wait
+      parameters:
+          maxDuration: 5
+
+    # Gerar os arquivos de análise
+    - type: report
+      parameters:
+          template: traditional-json
+          reportDir: /zap/out
+          reportFile: zap-report.json
+          reportTitle: 'DAST - Authentication API'
+          reportDescription: 'Alertas padrão do ZAP e testes comportamentais complementares.'
+
+    - type: report
+      parameters:
+          template: traditional-html
+          reportDir: /zap/out
+          reportFile: zap-report.html
+          reportTitle: 'DAST - Authentication API'
+          reportDescription: 'Alertas padrão do ZAP e testes comportamentais complementares.'
