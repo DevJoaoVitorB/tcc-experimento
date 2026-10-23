@@ -77,7 +77,7 @@ jobs:
     - type: spider
       parameters:
           context: authentication-api
-          url: http://127.0.0.1:3000
+          url: http://127.0.0.1:3000/health
           maxDuration: 5
 
     # 5. Executa a análise dinâmica no contexto importado do OpenAPI.
