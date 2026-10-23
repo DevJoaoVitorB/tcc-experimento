@@ -1,16 +1,11 @@
 /*
- * RS06 — Autenticação e gerenciamento de sessão
+ * RS07 — Tratamento seguro de erros
  * OWASP ZAP Active Scan Script
  *
- * Base: testRs06() de dast-rs01-rs07.test.ts
+ * Base: testRs07() de dast-rs01-rs07.test.ts
  *
- * Requer:
- *   DAST_BASE_URL=http://localhost:3000
- *
- * Observação:
- *   O script é disparado quando o Active Scan alcança /auth/login.
- *   Os cenários de rate limiting devem ser executados separadamente
- *   e por último, conforme o experimento original.
+ * Executa os cenários quando o Active Scan alcançar /auth/login.
+ * Confirme a compatibilidade com a versão do ZAP do pipeline.
  */
 
 const URI = Java.type('org.apache.commons.httpclient.URI');
@@ -24,14 +19,14 @@ var executed = false;
 
 function getMetadata() {
     return ScanRuleMetadata.fromYaml(`
-id: 110601
-name: RS06 - Autenticação e gerenciamento de sessão
-description: Verifica rejeição de tokens inválidos, autenticação, enumeração de contas e invalidação de refresh tokens.
-solution: Valide assinatura, algoritmo, validade e finalidade dos tokens. Aplique mensagens de autenticação consistentes e invalide sessões e refresh tokens após logout ou rotação.
+id: 110701
+name: RS07 - Tratamento seguro de erros
+description: Verifica exposição de detalhes internos e erros HTTP 5xx em respostas da API.
+solution: Implemente tratamento centralizado de exceções. Retorne mensagens genéricas ao cliente e registre detalhes técnicos apenas nos logs internos.
 reference: https://owasp.org/Top10/
-risk: HIGH
+risk: MEDIUM
 confidence: MEDIUM
-cweId: 287
+cweId: 209
 wascId: 0
     `);
 }
@@ -39,16 +34,13 @@ wascId: 0
 function scan(helper, msg, param, value) {
     if (executed) return;
 
-    var route = String(msg.getRequestHeader().getURI().getPath() || '');
-
-    if (route !== '/auth/login') return;
-
+    // Inicia na primeira requisição do contexto, sem depender da ordem do spider.
     executed = true;
 
     try {
-        runRs06(helper, msg, getBaseUrl(msg));
+        runRs07(helper, msg, getBaseUrl(msg));
     } catch (e) {
-        print('[RS06] INFRA_ERROR: ' + String(e));
+        print('[RS07] INFRA_ERROR: ' + String(e));
     }
 }
 
@@ -73,6 +65,22 @@ function randomHex() {
     return String(UUID.randomUUID()).replace(/-/g, '');
 }
 
+function registerBody(overrides) {
+    var body = {
+        name: 'DAST RS07 User',
+        email: 'dast-rs07-' + randomHex() + '@example.invalid',
+        password: 'Dast-' + randomHex() + '!',
+    };
+
+    if (overrides) {
+        Object.keys(overrides).forEach(function (key) {
+            body[key] = overrides[key];
+        });
+    }
+
+    return body;
+}
+
 function send(helper, original, base, method, route, options) {
     options = options || {};
 
@@ -88,7 +96,6 @@ function send(helper, original, base, method, route, options) {
             target.getHost() +
                 (target.getPort() > 0 ? ':' + target.getPort() : ''),
         );
-
     message.getRequestHeader().setHeader('Authorization', '');
 
     if (options.token) {
@@ -106,8 +113,9 @@ function send(helper, original, base, method, route, options) {
     }
 
     message.setRequestBody(body);
+    message.getRequestHeader().setHeader('Content-Length', String(body.length));
 
-    if (options.body !== undefined || options.rawBody !== undefined) {
+    if (options.rawBody !== undefined || options.body !== undefined) {
         message
             .getRequestHeader()
             .setHeader(
@@ -116,476 +124,258 @@ function send(helper, original, base, method, route, options) {
             );
     }
 
-    message.getRequestHeader().setHeader('Content-Length', String(body.length));
-
     helper.sendAndReceive(message, false, false);
-
-    var text = String(message.getResponseBody().toString());
-    var json = null;
-
-    try {
-        json = text ? JSON.parse(text) : null;
-    } catch (_) {}
 
     return {
         status: Number(message.getResponseHeader().getStatusCode()),
-        text: text,
-        json: json,
+        text: String(message.getResponseBody().toString()),
         message: message,
     };
 }
 
-function isSuccess(status) {
-    return status >= 200 && status < 300;
+function leaksInternalDetails(text) {
+    return /stack trace|node_modules|\/app\/|\/home\/|prisma\.|SQLITE_ERROR|SQLITE_[A-Z_]+|DATABASE_URL|JWT_(ACCESS|REFRESH)_SECRET|PrismaClient\w*Error|\bP20\d\d\b|Unique constraint failed|SyntaxError|JsonWebTokenError|TokenExpiredError|jwt malformed|\bat\s+(?:async\s+)?[\w.<>$]+\s+\([^)]*:\d+:\d+\)|\.(?:ts|js):\d+:\d+/i.test(
+        text || '',
+    );
 }
 
-function isRejected(status) {
-    return [400, 401, 403, 404, 405, 409, 413, 415, 422].indexOf(status) >= 0;
+function exposesFrameworkDefaults(text) {
+    return /Cannot (GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS) \//.test(
+        text || '',
+    );
 }
 
-function rejectionResult(status, expected) {
-    if (expected.indexOf(status) >= 0) return 'PASS';
-
-    if (
-        isSuccess(status) ||
-        status >= 500 ||
-        status === 401 ||
-        status === 403 ||
-        status === 409
-    ) {
-        return 'FAIL';
-    }
-
-    return isRejected(status) ? 'NOT_EVALUATED' : 'FAIL';
-}
-
-function accessResult(status) {
-    if (status === 401 || status === 403) return 'PASS';
-    if (isSuccess(status) || status >= 500) return 'FAIL';
-    return 'NOT_EVALUATED';
-}
-
-function tokenFrom(data, names) {
-    if (!data || typeof data !== 'object') return null;
-
-    for (var i = 0; i < names.length; i++) {
-        if (typeof data[names[i]] === 'string' && data[names[i]]) {
-            return data[names[i]];
-        }
-    }
-
-    return tokenFrom(data.data, names) || tokenFrom(data.tokens, names);
-}
-
-function registerAccount(helper, original, base, label) {
-    var account = {
-        email: 'dast-rs06-' + label + '-' + randomHex() + '@example.invalid',
-        password: 'Dast-' + randomHex() + '!',
-        accessToken: null,
-        refreshToken: null,
-        created: false,
-    };
-
-    var reg = send(helper, original, base, 'POST', '/auth/register', {
-        body: {
-            name: 'DAST RS06 User',
-            email: account.email,
-            password: account.password,
-        },
-    });
-
-    account.created = [200, 201, 202].indexOf(reg.status) >= 0;
-
-    if (!account.created) {
-        print(
-            '[RS06] PREP: cadastro da conta ' +
-                label +
-                ' não concluído; HTTP ' +
-                reg.status,
-        );
-        return account;
-    }
-
-    var login = send(helper, original, base, 'POST', '/auth/login', {
-        body: {
-            email: account.email,
-            password: account.password,
-        },
-    });
-
-    if (isSuccess(login.status)) {
-        account.accessToken = tokenFrom(login.json, [
-            'accessToken',
-            'access_token',
-            'token',
-        ]);
-
-        account.refreshToken = tokenFrom(login.json, [
-            'refreshToken',
-            'refresh_token',
-        ]);
-    }
-
-    if (!account.accessToken || !account.refreshToken) {
-        print(
-            '[RS06] PREP: tokens ausentes para conta ' +
-                label +
-                '; HTTP ' +
-                login.status,
-        );
-    }
-
-    return account;
-}
-
-function record(helper, original, base, test, result, detail, evidence) {
-    print('[RS06] ' + test + ' => ' + result + '; ' + detail);
-
-    if (result !== 'FAIL') return;
-
-    var msg = evidence && evidence.message ? evidence.message : original;
-
+function createAlert(helper, response, test, evidence) {
     helper
         .newAlert()
         .setRisk(2)
         .setConfidence(2)
-        .setName('RS06 - ' + test)
+        .setName('RS07 - ' + test)
         .setDescription(
-            'O cenário de segurança RS06 não foi satisfeito. ' + detail,
+            'A resposta da API revelou detalhes internos ou retornou um erro 5xx inesperado.',
         )
-        .setUri(base)
+        .setUri(String(response.message.getRequestHeader().getURI().toString()))
         .setParam(test)
-        .setEvidence('HTTP ' + (evidence ? evidence.status : 'N/A'))
-        .setOtherInfo(detail)
+        .setEvidence(evidence)
+        .setOtherInfo(
+            'HTTP ' +
+                response.status +
+                '. Verifique o corpo da resposta e os logs do servidor.',
+        )
         .setSolution(
-            'Valide tokens e sessões no servidor, use respostas consistentes ' +
-                'para falhas de autenticação e invalide refresh tokens após logout.',
+            'Trate exceções de forma centralizada, retorne mensagens genéricas ' +
+                'e evite expor stack traces, caminhos locais, detalhes do banco de ' +
+                'dados ou informações internas do framework.',
         )
         .setReference('https://owasp.org/Top10/')
-        .setCweId(287)
-        .setMessage(msg)
+        .setCweId(209)
+        .setMessage(response.message)
         .raise();
 }
 
-function runRs06(helper, original, base) {
-    var account = registerAccount(helper, original, base, 'a');
+function check(helper, response, test, framework) {
+    var leaked =
+        leaksInternalDetails(response.text) ||
+        (framework && exposesFrameworkDefaults(response.text));
 
-    // 1. Tokens inválidos, assinatura adulterada e alg=none.
-    var tokenCases = [
-        {
-            name: 'Token inválido é rejeitado',
-            token: function () {
-                return 'token.invalido';
-            },
-        },
-        {
-            name: 'Token com assinatura adulterada é rejeitado',
-            token: function () {
-                if (!account.accessToken) return null;
-                var p = account.accessToken.split('.');
-                if (p.length !== 3 || !p[2]) return null;
-                p[2] = (p[2][0] === 'A' ? 'B' : 'A') + p[2].slice(1);
-                return p.join('.');
-            },
-        },
-        {
-            name: 'Token sem assinatura alg none é rejeitado',
-            token: function () {
-                if (!account.accessToken) return null;
+    var serverError = response.status >= 500;
+    var failed = leaked || serverError;
 
-                var p = account.accessToken.split('.');
-                if (p.length !== 3) return null;
+    var result = failed ? 'FAIL' : 'PASS';
+    var detail =
+        'HTTP ' +
+        response.status +
+        '; detalhes internos ' +
+        (leaked ? 'detectados' : 'não detectados') +
+        (serverError ? '; erro HTTP 5xx inesperado' : '');
 
-                var header = javaBase64Url(
-                    JSON.stringify({ alg: 'none', typ: 'JWT' }),
-                );
+    print('[RS07] ' + test + ' => ' + result + '; ' + detail);
 
-                return header + '.' + p[1] + '.';
-            },
-        },
-    ];
-
-    tokenCases.forEach(function (test) {
-        var token = test.token();
-
-        if (!token) {
-            print(
-                '[RS06] ' +
-                    test.name +
-                    ' => NOT_EVALUATED; token JWT compatível não disponível.',
-            );
-            return;
-        }
-
-        var response = send(helper, original, base, 'GET', '/users/me', {
-            token: token,
-        });
-
-        record(
+    if (failed) {
+        createAlert(
             helper,
-            original,
-            base,
-            test.name,
-            accessResult(response.status),
-            'HTTP ' + response.status + '; esperado 401 ou 403.',
             response,
+            test,
+            'HTTP ' +
+                response.status +
+                (leaked ? '; possível vazamento de detalhes internos' : '') +
+                (serverError ? '; erro 5xx' : ''),
         );
-    });
+    }
+}
 
-    // 2. Login com conta inexistente e senha incorreta.
-    var invalidLoginCases = [
+function runRs07(helper, original, base) {
+    var invalidPayloads = [
         {
-            name: 'Login com conta inexistente é rejeitado',
+            route: '/auth/register',
+            label: 'Cadastro sem campos',
+            body: {},
+        },
+        {
+            route: '/auth/register',
+            label: 'Cadastro com tipos inválidos',
             body: {
-                email: 'ausente-' + randomHex() + '@example.invalid',
+                name: { invalid: true },
+                email: 123,
+                password: ['invalid'],
+            },
+        },
+        {
+            route: '/auth/login',
+            label: 'Login sem campos',
+            body: {},
+        },
+        {
+            route: '/auth/login',
+            label: 'Login com tipos inválidos',
+            body: {
+                email: null,
+                password: { invalid: true },
+            },
+        },
+        {
+            route: '/auth/login',
+            label: 'Login com objeto de filtro no e-mail',
+            body: {
+                email: { contains: '@' },
                 password: 'Senha-Incorreta-123!',
             },
         },
         {
-            name: 'Login com senha incorreta é rejeitado',
+            route: '/auth/refresh',
+            label: 'Refresh sem campos',
+            body: {},
+        },
+        {
+            route: '/auth/refresh',
+            label: 'Refresh com tipo inválido',
             body: {
-                email: account.email,
-                password: 'Errada-' + randomHex() + '!',
+                refreshToken: { invalid: true },
             },
-            needsAccount: true,
         },
     ];
 
-    invalidLoginCases.forEach(function (test) {
-        if (test.needsAccount && !account.created) {
-            print(
-                '[RS06] ' +
-                    test.name +
-                    ' => NOT_EVALUATED; conta de teste não criada.',
-            );
-            return;
-        }
+    var scenarios = [
+        {
+            name: 'Erro de login',
+            run: function () {
+                return send(helper, original, base, 'POST', '/auth/login', {
+                    body: {
+                        email: 'ausente-' + randomHex() + '@example.invalid',
+                        password: 'Senha-Incorreta-123!',
+                    },
+                });
+            },
+        },
+    ];
 
-        var response = send(helper, original, base, 'POST', '/auth/login', {
-            body: test.body,
+    invalidPayloads.forEach(function (test) {
+        scenarios.push({
+            name: test.label,
+            run: function () {
+                return send(helper, original, base, 'POST', test.route, {
+                    body: test.body,
+                });
+            },
         });
-
-        record(
-            helper,
-            original,
-            base,
-            test.name,
-            rejectionResult(response.status, [400, 401, 403, 422]),
-            'HTTP ' + response.status + '; esperada rejeição de autenticação.',
-            response,
-        );
     });
 
-    // 3. Enumeração de contas por diferença no conteúdo/status.
-    if (!account.created) {
-        print(
-            '[RS06] Login não revela se a conta existe => ' +
-                'NOT_EVALUATED; conta de teste não criada.',
-        );
-    } else {
-        var known = send(helper, original, base, 'POST', '/auth/login', {
-            body: {
-                email: account.email,
-                password: 'Errada-' + randomHex() + '!',
-            },
-        });
+    scenarios.push({
+        name: 'JSON malformado',
+        run: function () {
+            return send(helper, original, base, 'POST', '/auth/login', {
+                rawBody: '{"email": "x", "password":',
+                contentType: 'application/json',
+            });
+        },
+    });
 
-        var unknownEmail = 'outra-' + randomHex() + '@example.invalid';
+    scenarios.push({
+        name: 'Corpo acima do limite',
+        run: function () {
+            return send(helper, original, base, 'POST', '/auth/login', {
+                body: {
+                    email: 'a@example.invalid',
+                    password: new Array(1100001).join('A'),
+                },
+            });
+        },
+    });
 
-        var unknown = send(helper, original, base, 'POST', '/auth/login', {
-            body: {
-                email: unknownEmail,
-                password: 'Errada-' + randomHex() + '!',
-            },
-        });
-
-        if (known.status === 429 || unknown.status === 429) {
-            print(
-                '[RS06] Login não revela se a conta existe => ' +
-                    'NOT_EVALUATED; rate limit HTTP 429 interferiu.',
-            );
-        } else {
-            var knownText = known.text.split(account.email).join('<email>');
-            var unknownText = unknown.text.split(unknownEmail).join('<email>');
-            var equal =
-                known.status === unknown.status && knownText === unknownText;
-
-            record(
+    scenarios.push({
+        name: 'Rota inexistente',
+        framework: true,
+        run: function () {
+            return send(
                 helper,
                 original,
                 base,
-                'Login não revela se a conta existe',
-                equal ? 'PASS' : 'FAIL',
-                'Conta existente HTTP ' +
-                    known.status +
-                    '; inexistente HTTP ' +
-                    unknown.status +
-                    '; respostas ' +
-                    (equal ? 'iguais' : 'diferentes') +
-                    '. Tempo de resposta não avaliado.',
-                known,
+                'GET',
+                '/rota-inexistente-' + randomHex(),
+                {},
             );
-        }
-    }
-
-    // 4. Refresh token inválido.
-    var invalidRefresh = send(helper, original, base, 'POST', '/auth/refresh', {
-        body: { refreshToken: 'invalido-' + randomHex() },
+        },
     });
 
-    record(
-        helper,
-        original,
-        base,
-        'Refresh token inválido é rejeitado',
-        rejectionResult(invalidRefresh.status, [400, 401, 403, 422]),
-        'HTTP ' + invalidRefresh.status + '.',
-        invalidRefresh,
-    );
+    scenarios.forEach(function (test) {
+        try {
+            var response = test.run();
+            check(
+                helper,
+                response,
+                test.name + ' não revela detalhes internos',
+                !!test.framework,
+            );
+        } catch (e) {
+            print('[RS07] INFRA_ERROR - ' + test.name + ': ' + String(e));
+        }
+    });
 
-    // 5. Rotação: token anterior deve ser rejeitado após renovação.
-    if (!account.created) {
+    // Cadastro duplicado: usa a mesma conta temporária criada aqui.
+    var account = registerBody();
+
+    var registration = send(helper, original, base, 'POST', '/auth/register', {
+        body: account,
+    });
+
+    if ([200, 201, 202].indexOf(registration.status) < 0) {
         print(
-            '[RS06] Refresh token anterior é rejeitado após renovação => ' +
-                'NOT_EVALUATED; conta não criada.',
+            '[RS07] Cadastro duplicado => NOT_EVALUATED; ' +
+                'preparação HTTP ' +
+                registration.status,
         );
     } else {
-        var session = send(helper, original, base, 'POST', '/auth/login', {
-            body: { email: account.email, password: account.password },
+        var duplicate = send(helper, original, base, 'POST', '/auth/register', {
+            body: account,
         });
 
-        var refreshToken = tokenFrom(session.json, [
-            'refreshToken',
-            'refresh_token',
-        ]);
-
-        if (!refreshToken) {
+        if (duplicate.status === 429) {
             print(
-                '[RS06] Refresh token anterior é rejeitado após renovação => ' +
-                    'NOT_EVALUATED; refresh token ausente.',
+                '[RS07] Cadastro duplicado => NOT_EVALUATED; rate limit HTTP 429.',
             );
         } else {
-            var first = send(helper, original, base, 'POST', '/auth/refresh', {
-                body: { refreshToken: refreshToken },
-            });
-
-            if (!isSuccess(first.status)) {
-                print(
-                    '[RS06] Refresh token anterior é rejeitado após renovação => ' +
-                        'NOT_EVALUATED; renovação inicial HTTP ' +
-                        first.status +
-                        '.',
-                );
-            } else {
-                var reuse = send(
-                    helper,
-                    original,
-                    base,
-                    'POST',
-                    '/auth/refresh',
-                    { body: { refreshToken: refreshToken } },
-                );
-
-                record(
-                    helper,
-                    original,
-                    base,
-                    'Refresh token anterior é rejeitado após renovação',
-                    rejectionResult(reuse.status, [400, 401, 403, 422]),
-                    'Renovação HTTP ' +
-                        first.status +
-                        '; reutilização HTTP ' +
-                        reuse.status +
-                        '. Interpretar conforme o design da API.',
-                    reuse,
-                );
-            }
+            check(
+                helper,
+                duplicate,
+                'Cadastro duplicado não revela detalhes internos nem retorna 5xx',
+                false,
+            );
         }
     }
 
-    // 6. Refresh token deve ser rejeitado após logout.
-    if (!account.created) {
-        print(
-            '[RS06] Refresh token é rejeitado após logout => ' +
-                'NOT_EVALUATED; conta não criada.',
-        );
-    } else {
-        var logoutSession = send(
+    // Tokens inválidos: verifica vazamento e erros 5xx.
+    var tokens = ['token.invalido', 'a.b.c'];
+
+    tokens.forEach(function (token) {
+        var response = send(helper, original, base, 'GET', '/users/me', {
+            token: token,
+        });
+
+        check(
             helper,
-            original,
-            base,
-            'POST',
-            '/auth/login',
-            { body: { email: account.email, password: account.password } },
+            response,
+            'Token inválido não revela detalhes internos nem retorna 5xx',
+            false,
         );
-
-        var accessToken = tokenFrom(logoutSession.json, [
-            'accessToken',
-            'access_token',
-            'token',
-        ]);
-
-        var refresh = tokenFrom(logoutSession.json, [
-            'refreshToken',
-            'refresh_token',
-        ]);
-
-        if (!accessToken || !refresh) {
-            print(
-                '[RS06] Refresh token é rejeitado após logout => ' +
-                    'NOT_EVALUATED; tokens ausentes.',
-            );
-        } else {
-            var logout = send(helper, original, base, 'POST', '/auth/logout', {
-                token: accessToken,
-                body: { refreshToken: refresh },
-            });
-
-            if (!isSuccess(logout.status)) {
-                print(
-                    '[RS06] Refresh token é rejeitado após logout => ' +
-                        'NOT_EVALUATED; logout HTTP ' +
-                        logout.status +
-                        '.',
-                );
-            } else {
-                var afterLogout = send(
-                    helper,
-                    original,
-                    base,
-                    'POST',
-                    '/auth/refresh',
-                    { body: { refreshToken: refresh } },
-                );
-
-                record(
-                    helper,
-                    original,
-                    base,
-                    'Refresh token é rejeitado após logout',
-                    rejectionResult(afterLogout.status, [400, 401, 403, 422]),
-                    'Logout HTTP ' +
-                        logout.status +
-                        '; refresh posterior HTTP ' +
-                        afterLogout.status +
-                        '.',
-                    afterLogout,
-                );
-            }
-        }
-    }
-
-    print(
-        '[RS06] Limitação de tentativas de login: execute separadamente, ' +
-            'por último, com a quantidade de tentativas configurada no TypeScript.',
-    );
-}
-
-function javaBase64Url(text) {
-    var Base64 = Java.type('java.util.Base64');
-    var bytes = new java.lang.String(text).getBytes('UTF-8');
-
-    return String(
-        Base64.getUrlEncoder().withoutPadding().encodeToString(bytes),
-    );
+    });
 }

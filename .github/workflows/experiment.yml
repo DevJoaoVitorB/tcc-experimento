@@ -288,6 +288,7 @@ jobs:
             - name: Initialize DAST evidence
               shell: bash
               run: |
+                  set -euo pipefail
                   EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
                   mkdir -p "$EVIDENCE_DIR"
 
@@ -306,10 +307,12 @@ jobs:
               id: build
               shell: bash
               run: |
-                  set -o pipefail
+                  set -euo pipefail
                   EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
+
                   docker build --tag "$DAST_IMAGE" . \
                     2>&1 | tee "$EVIDENCE_DIR/docker-build.log"
+
                   echo "docker_build_exit_code=${PIPESTATUS[0]}" \
                     >> "$EVIDENCE_DIR/metadata.txt"
 
@@ -334,7 +337,7 @@ jobs:
               id: readiness
               shell: bash
               run: |
-                  set -u
+                  set -euo pipefail
                   EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
                   ready=false
 
@@ -369,12 +372,12 @@ jobs:
                     exit 1
                   fi
 
-            - name: Verify DAST scripts
+            - name: Verify DAST configuration and scripts
               shell: bash
               run: |
-                  echo "Workspace: $GITHUB_WORKSPACE"
-                  echo "Arquivos encontrados:"
-                  find "$GITHUB_WORKSPACE/workflows_support/dast" -type f -print
+                  set -euo pipefail
+
+                  test -s "$DAST_PLAN"
 
                   for script in \
                     rs01-access-control.js \
@@ -384,26 +387,32 @@ jobs:
                     rs06-authentication-protection.js \
                     rs07-exception-handling.js
                   do
-                    path="$GITHUB_WORKSPACE/workflows_support/dast/scripts/$script"
-
-                    if [ -f "$path" ]; then
-                      echo "OK: $path"
-                    else
-                      echo "::error::Arquivo não encontrado: $path"
+                    path="$GITHUB_WORKSPACE/$DAST_CONFIG_DIR/scripts/$script"
+                    if [ ! -s "$path" ]; then
+                      echo "::error::Script ausente ou vazio: $path"
                       exit 1
                     fi
+                    echo "OK: $path"
                   done
+
+                  if [ ! -s "$GITHUB_WORKSPACE/openapi.json" ] &&
+                     ! curl -fsS --max-time 5 \
+                       "$DAST_BASE_URL/openapi.json" \
+                       -o "$EVIDENCE_DIR/openapi.json"; then
+                    echo "::error::OpenAPI não encontrado no arquivo local nem em /openapi.json."
+                    exit 1
+                  fi
 
             - name: Run OWASP ZAP
               id: zap
               shell: bash
               run: |
-                  set +e
+                  set -uo pipefail
                   EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
 
-                  mkdir -p "$EVIDENCE_DIR"
                   chmod -R 777 "$EVIDENCE_DIR"
 
+                  set +e
                   docker run --rm \
                     --network host \
                     --volume "$GITHUB_WORKSPACE:/zap/wrk:ro" \
@@ -415,6 +424,8 @@ jobs:
                     2>&1 | tee "$EVIDENCE_DIR/zap.log"
 
                   status=${PIPESTATUS[0]}
+                  set -e
+
                   echo "zap_exit_code=$status" \
                     >> "$EVIDENCE_DIR/metadata.txt"
 
@@ -432,6 +443,13 @@ jobs:
                     fi
                   done
 
+                  if ! jq -e '.site and (.site | length > 0)' \
+                    "$EVIDENCE_DIR/zap-report.json" >/dev/null; then
+                    echo "O relatório JSON do ZAP não contém sites analisados." \
+                      | tee -a "$EVIDENCE_DIR/error.txt"
+                    exit 1
+                  fi
+
                   echo "reports_validated=true" \
                     >> "$EVIDENCE_DIR/metadata.txt"
 
@@ -440,6 +458,8 @@ jobs:
               shell: bash
               run: |
                   EVIDENCE_DIR="$GITHUB_WORKSPACE/$EVIDENCE_DIR"
+                  mkdir -p "$EVIDENCE_DIR"
+
                   docker logs dast-api \
                     > "$EVIDENCE_DIR/application.log" 2>&1 || true
 
@@ -485,6 +505,8 @@ jobs:
 
             - name: Generate consolidated analysis report
               shell: bash
+              env:
+                  EXPERIMENT_GROUP: ${{ inputs.experiment_group }}
               run: |
                   set -euo pipefail
 
@@ -504,11 +526,11 @@ jobs:
                     fi
                   }
 
-                  copy_report collected/semgrep-report.json report-sast.json
-                  copy_report collected/npm-audit-all.json report-sca-all.json
-                  copy_report collected/npm-audit-production.json report-sca-production.json
-                  copy_report collected/zap-report.json report-dast-zap.json
-                  copy_report collected/dast-rs01-rs07-report.json report-dast-complementary.json
+                  copy_report collected/semgrep-report.json sast-report.json
+                  copy_report collected/npm-audit-all.json sca-all-report.json
+                  copy_report collected/npm-audit-production.json sca-production-report.json
+                  copy_report collected/zap-report.json dast-zap-report.json
+                  copy_report collected/dast-rs01-rs07-report.json dast-complementary-report.json
 
                   {
                     echo "# Relatório consolidado de segurança"
@@ -519,13 +541,13 @@ jobs:
                     echo "- Execução: \`$GITHUB_RUN_ID\`"
                     echo "- Tentativa: \`$GITHUB_RUN_ATTEMPT\`"
                     echo "- Commit: \`$GITHUB_SHA\`"
-                    echo "- Grupo experimental: \`${{ inputs.experiment_group }}\`"
+                    echo "- Grupo experimental: \`$EXPERIMENT_GROUP\`"
                     echo "- Data UTC: $(date -u '+%Y-%m-%d %H:%M:%S')"
                     echo
 
                     echo "## SAST — Semgrep"
                     echo
-                    if [ -s "$REPORTS/report-sast.json" ]; then
+                    if [ -s "$REPORTS/sast-report.json" ]; then
                       jq -r '
                         "| Métrica | Quantidade |",
                         "|---|---:|",
@@ -537,7 +559,7 @@ jobs:
                         ([.results[]?.extra.severity // "UNKNOWN"]
                           | sort | group_by(.)[]
                           | "| \(.[0]) | \(length) |")
-                      ' "$REPORTS/report-sast.json"
+                      ' "$REPORTS/sast-report.json"
                     else
                       echo "Relatório SAST ausente ou inválido."
                     fi
@@ -545,7 +567,7 @@ jobs:
 
                     echo "## SCA — npm audit"
                     echo
-                    for file in report-sca-all.json report-sca-production.json; do
+                    for file in sca-all-report.json sca-production-report.json; do
                       echo "### $file"
                       echo
                       if [ -s "$REPORTS/$file" ]; then
@@ -568,26 +590,114 @@ jobs:
 
                     echo "## DAST — OWASP ZAP"
                     echo
-                    if [ -s "$REPORTS/report-dast-zap.json" ]; then
-                      jq -r '
-                        "| Métrica | Quantidade |",
-                        "|---|---:|",
-                        "| Alertas registrados | \([.site[]?.alerts[]?] | length) |",
-                        "",
-                        "| Risco reportado | Quantidade |",
-                        "|---|---:|",
-                        ([.site[]?.alerts[]?.riskdesc // "Desconhecido"]
-                          | sort | group_by(.)[]
-                          | "| \(.[0]) | \(length) |")
-                      ' "$REPORTS/report-dast-zap.json"
+                    if [ -s "$REPORTS/dast-zap-report.json" ] &&
+                       [ -s "$REPORTS/dast-complementary-report.json" ]; then
+
+                      # O ZAP utiliza riskcode para classificar o risco.
+                      # Os scripts complementares precisam fornecer findings
+                      # com severidade e evidências que permitam comparar achados.
+                      jq -nr \
+                        --slurpfile zap "$REPORTS/dast-zap-report.json" \
+                        --slurpfile complementary "$REPORTS/dast-complementary-report.json" '
+                        def zap_findings:
+                          [
+                            $zap[0].site[]?.alerts[]? |
+                            {
+                              source: "zap",
+                              severity: (
+                                if (.riskcode | tostring) == "3" then "High"
+                                elif (.riskcode | tostring) == "2" then "Medium"
+                                elif (.riskcode | tostring) == "1" then "Low"
+                                elif (.riskcode | tostring) == "0" then "Informational"
+                                else "Unknown"
+                                end
+                              ),
+                              key: (
+                                [
+                                  (.pluginid // ""),
+                                  (.name // ""),
+                                  (.riskcode // ""),
+                                  (.instances[]? | [
+                                    (.uri // ""),
+                                    (.param // ""),
+                                    (.method // ""),
+                                    (.evidence // "")
+                                  ] | join("|"))
+                                ] | join("|")
+                              )
+                            }
+                          ];
+
+                        def complementary_findings:
+                          [
+                            $complementary[0].findings[]? |
+                            {
+                              source: "complementary",
+                              severity: (
+                                ((.severity // "Unknown") | tostring | ascii_downcase) as $s |
+                                if ($s == "high" or $s == "alta") then "High"
+                                elif ($s == "medium" or $s == "moderate" or $s == "moderada") then "Medium"
+                                elif ($s == "low" or $s == "baixa") then "Low"
+                                elif ($s == "informational" or $s == "info" or $s == "informativa") then "Informational"
+                                else "Unknown"
+                                end
+                              ),
+                              key: (
+                                [
+                                  (.id // .ruleId // .test // .name // ""),
+                                  (.endpoint // .url // .path // ""),
+                                  (.parameter // .param // ""),
+                                  (.evidence // .evidenceSummary // "")
+                                ] | map(tostring) | join("|")
+                              )
+                            }
+                          ];
+
+                        (zap_findings) as $z |
+                        (complementary_findings) as $c |
+                        ($z + $c) as $all |
+                        ["High", "Medium", "Low", "Informational", "Unknown"][] as $severity |
+                        [
+                          $severity,
+                          ([$z[] | select(.severity == $severity)] | length),
+                          ([$c[] | select(.severity == $severity)] | length),
+                          ([$all[] | select(.severity == $severity)] | length),
+                          (
+                            [
+                              $all[] |
+                              select(.severity == $severity) |
+                              .key
+                            ] | unique | length
+                          )
+                        ] |
+                        "| Severidade | ZAP padrão | Scripts complementares | Total bruto | Total sem duplicatas |",
+                        "|---|---:|---:|---:|---:|",
+                        (
+                          ["High", "Medium", "Low", "Informational", "Unknown"][] as $s |
+                          [
+                            $s,
+                            ([$z[] | select(.severity == $s)] | length),
+                            ([$c[] | select(.severity == $s)] | length),
+                            ([$all[] | select(.severity == $s)] | length),
+                            (
+                              [
+                                $all[] |
+                                select(.severity == $s) |
+                                .key
+                              ] | unique | length
+                            )
+                          ] |
+                          "| \(.[0]) | \(.[1]) | \(.[2]) | \(.[3]) | \(.[4]) |"
+                        )
+                      '
                     else
-                      echo "Relatório JSON do ZAP ausente ou inválido."
+                      echo "Não foi possível calcular os totais: um ou ambos os relatórios DAST estão ausentes ou inválidos."
                     fi
                     echo
 
-                    echo "## DAST — Testes complementares"
+                    echo "## DAST — Testes complementares por status"
                     echo
-                    if [ -s "$REPORTS/report-dast-complementary.json" ]; then
+                    if [ -s "$REPORTS/dast-complementary-report.json" ]; then
                       jq -r '
                         if (.summary | type) == "object" then
                           "| Resultado | Quantidade |",
@@ -599,7 +709,7 @@ jobs:
                         else
                           "O relatório não possui o campo summary esperado."
                         end
-                      ' "$REPORTS/report-dast-complementary.json"
+                      ' "$REPORTS/dast-complementary-report.json"
                     else
                       echo "Relatório complementar ausente ou inválido."
                     fi
@@ -610,13 +720,14 @@ jobs:
                     echo "- A ausência de relatório não significa ausência de vulnerabilidades."
                     echo "- Os achados devem ser interpretados conforme os critérios de cada ferramenta."
                     echo "- SAST, SCA e DAST são análises distintas; seus totais não devem ser somados automaticamente."
+                    echo "- A deduplicação DAST é baseada nos identificadores e nas evidências disponíveis nos relatórios; resultados equivalentes podem exigir validação manual."
                     echo "- Os relatórios JSON originais são preservados para auditoria."
                     echo
 
                     echo "## Relatórios JSON incluídos"
                     echo
                     found=false
-                    for file in "$REPORTS"/report-*.json; do
+                    for file in "$REPORTS"/*-report.json; do
                       [ -f "$file" ] || continue
                       echo "- \`$(basename "$file")\`"
                       found=true
@@ -628,37 +739,6 @@ jobs:
 
                   cat "$OUTPUT"
 
-            - name: Collect original logs and metadata
-              shell: bash
-              run: |
-                  set -euo pipefail
-
-                  mkdir -p analysis/evidence
-
-                  if [ -d collected ]; then
-                    find collected -type f \
-                      \( -name '*.log' -o -name 'metadata.txt' -o -name 'error*.txt' \) \
-                      -print0 |
-                    while IFS= read -r -d '' file; do
-                      relative="${file#collected/}"
-                      mkdir -p "analysis/evidence/$(dirname "$relative")"
-                      cp "$file" "analysis/evidence/$relative"
-                    done
-                  fi
-
-            - name: Package consolidated analysis
-              shell: bash
-              run: |
-                  set -euo pipefail
-
-                  zip -r analysis/analysis.zip \
-                    analysis/analysis.md \
-                    analysis/reports \
-                    analysis/evidence
-
-                  echo "Conteúdo do pacote:"
-                  unzip -l analysis/analysis.zip
-
             - name: Upload consolidated analysis
               if: always()
               uses: actions/upload-artifact@v4
@@ -666,8 +746,6 @@ jobs:
                   name: analysis-evidence
                   path: |
                       analysis/analysis.md
-                      analysis/analysis.zip
-                      analysis/reports/
-                      analysis/evidence/
+                      analysis/reports/*-report.json
                   if-no-files-found: warn
                   retention-days: 90
